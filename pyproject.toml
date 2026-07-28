@@ -1,7 +1,7 @@
 [project]
 name = "digital-child"
-version = "0.1.0"
-description = "Measurable developmental core for a long-lived digital agent."
+version = "0.2.0"
+description = "A measurable developmental core for a long-lived digital agent."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [

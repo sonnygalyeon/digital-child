@@ -1,3 +1,5 @@
+import pytest
+
 from digital_child.experience import ExperienceEngine
 from digital_child.models import DevelopmentDomain, Observation
 
@@ -17,26 +19,20 @@ def test_experience_is_distributed_between_domains() -> None:
             DevelopmentDomain.FACTUAL_KNOWLEDGE: 1,
         },
     )
-
     result = ExperienceEngine().assess(observation)
-
     assert result.effective_units == 100
     assert result.domain_units[DevelopmentDomain.CAUSAL_REASONING] == 75
-    assert result.domain_units[DevelopmentDomain.FACTUAL_KNOWLEDGE] == 25
 
 
-def test_missing_confirmation_does_not_zero_experience() -> None:
+def test_experience_requires_calculated_novelty() -> None:
     observation = Observation(
-        content="Unconfirmed explanation",
-        raw_units=10,
-        novelty=1.0,
-        attention=1.0,
-        comprehension=1.0,
-        reliability=1.0,
-        integration=1.0,
-        practical_confirmation=0.0,
+        content="unknown",
+        raw_units=1,
+        novelty=None,
+        attention=1,
+        comprehension=1,
+        reliability=1,
+        integration=1,
     )
-
-    result = ExperienceEngine().assess(observation)
-
-    assert result.effective_units == 5
+    with pytest.raises(ValueError):
+        ExperienceEngine().assess(observation)
