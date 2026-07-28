@@ -12,7 +12,10 @@ class NoveltyEngine:
         self.comparison_limit = comparison_limit
 
     def calculate(self, content: str) -> float:
-        candidates = [belief.claim for belief in self.repository.list_beliefs(self.comparison_limit)]
+        candidates = [
+            belief.claim
+            for belief in self.repository.list_beliefs(self.comparison_limit)
+        ]
         candidates.extend(
             episode.content
             for episode in self.repository.recent_episodes(
