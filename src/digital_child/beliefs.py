@@ -50,8 +50,10 @@ class BeliefEngine:
 
         if claim_input.stance == EvidenceStance.SUPPORT:
             belief.support_score += weight
-        else:
+        elif claim_input.stance == EvidenceStance.CONTRADICT:
             belief.contradiction_score += weight
+        else:
+            weight = 0.0
 
         belief.evidence_count += 1
         belief.access_count += 1

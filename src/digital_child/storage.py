@@ -8,13 +8,22 @@ from pathlib import Path
 from digital_child.models import (
     AgentSnapshot,
     AgentState,
+    AuditEvent,
+    AutonomyDecision,
     Belief,
     DevelopmentProfile,
+    EmotionState,
     Episode,
     EvidenceRecord,
+    GenesisEvent,
+    Goal,
+    IdentityProfile,
     MemorySummary,
+    RelationshipProfile,
+    ResearchReport,
     SourceKind,
     SourceRecord,
+    TrustEvent,
 )
 
 
@@ -59,10 +68,12 @@ class SQLiteRepository:
                 CREATE TABLE IF NOT EXISTS agent_snapshot (
                     singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
                     state_json TEXT NOT NULL,
-                    profile_json TEXT NOT NULL
+                    profile_json TEXT NOT NULL,
+                    emotion_json TEXT NOT NULL DEFAULT '{}'
                 )
                 """
             )
+            self._ensure_snapshot_columns()
             self.connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS sources (
@@ -124,6 +135,93 @@ class SQLiteRepository:
                     mean_importance REAL NOT NULL
                 )
                 """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS identity (
+                    singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+                    identity_json TEXT NOT NULL
+                )
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS genesis_events (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    event_json TEXT NOT NULL
+                )
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS goals (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    priority REAL NOT NULL,
+                    goal_json TEXT NOT NULL
+                )
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS relationships (
+                    person_id TEXT PRIMARY KEY,
+                    updated_at TEXT NOT NULL,
+                    relationship_json TEXT NOT NULL
+                )
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trust_events (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    person_id TEXT NOT NULL,
+                    event_json TEXT NOT NULL
+                )
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS decisions (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    person_id TEXT NOT NULL,
+                    decision_json TEXT NOT NULL
+                )
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS research_reports (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    report_json TEXT NOT NULL
+                )
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                )
+                """
+            )
+
+
+    def _ensure_snapshot_columns(self) -> None:
+        columns = {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(agent_snapshot)")
+        }
+        if "emotion_json" not in columns:
+            self.connection.execute(
+                "ALTER TABLE agent_snapshot ADD COLUMN emotion_json TEXT NOT NULL DEFAULT '{}'"
             )
 
     def _ensure_episode_columns(self) -> None:
@@ -545,42 +643,271 @@ class SQLiteRepository:
             ).fetchall()
         return [MemorySummary.model_validate(dict(row)) for row in rows]
 
+
+    def get_or_create_person_source(
+        self,
+        person_id: str,
+        reliability: float,
+    ) -> SourceRecord:
+        source_id = f"person:{person_id}"
+        existing = self.get_source(source_id)
+        if existing is not None:
+            updated = existing.model_copy(update={"reliability": reliability})
+            self.save_source(updated)
+            return updated
+        source = SourceRecord(
+            id=source_id,
+            kind=SourceKind.CAREGIVER,
+            name=f"Собеседник {person_id}",
+            reliability=reliability,
+            metadata={"person_id": person_id},
+        )
+        self.save_source(source)
+        return source
+
+    def save_identity(self, identity: IdentityProfile) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO identity (singleton_id, identity_json)
+                VALUES (1, ?)
+                ON CONFLICT(singleton_id) DO UPDATE SET
+                    identity_json = excluded.identity_json
+                """,
+                (identity.model_dump_json(),),
+            )
+
+    def load_identity(self) -> IdentityProfile | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT identity_json FROM identity WHERE singleton_id = 1"
+            ).fetchone()
+        return None if row is None else IdentityProfile.model_validate_json(row["identity_json"])
+
+    def save_genesis_event(self, event: GenesisEvent) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT OR REPLACE INTO genesis_events (id, created_at, event_json)
+                VALUES (?, ?, ?)
+                """,
+                (event.id, event.created_at.isoformat(), event.model_dump_json()),
+            )
+
+    def latest_genesis_event(self) -> GenesisEvent | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT event_json FROM genesis_events ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        return None if row is None else GenesisEvent.model_validate_json(row["event_json"])
+
+    def save_goal(self, goal: Goal) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO goals (id, created_at, status, priority, goal_json)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    status = excluded.status,
+                    priority = excluded.priority,
+                    goal_json = excluded.goal_json
+                """,
+                (
+                    goal.id,
+                    goal.created_at.isoformat(),
+                    goal.status.value,
+                    goal.priority,
+                    goal.model_dump_json(),
+                ),
+            )
+
+    def list_goals(self, limit: int = 100, active_only: bool = True) -> list[Goal]:
+        condition = "WHERE status = 'active'" if active_only else ""
+        with self._lock:
+            rows = self.connection.execute(
+                (
+                    f"SELECT goal_json FROM goals {condition} "
+                    "ORDER BY priority DESC, created_at ASC LIMIT ?"
+                ),
+                (limit,),
+            ).fetchall()
+        return [Goal.model_validate_json(row["goal_json"]) for row in rows]
+
+    def save_relationship(self, relationship: RelationshipProfile) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO relationships (person_id, updated_at, relationship_json)
+                VALUES (?, ?, ?)
+                ON CONFLICT(person_id) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    relationship_json = excluded.relationship_json
+                """,
+                (
+                    relationship.person_id,
+                    relationship.updated_at.isoformat(),
+                    relationship.model_dump_json(),
+                ),
+            )
+
+    def load_relationship(self, person_id: str) -> RelationshipProfile | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT relationship_json FROM relationships WHERE person_id = ?",
+                (person_id,),
+            ).fetchone()
+        return None if row is None else RelationshipProfile.model_validate_json(
+            row["relationship_json"]
+        )
+
+    def save_trust_event(self, event: TrustEvent) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO trust_events (id, created_at, person_id, event_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                (event.id, event.created_at.isoformat(), event.person_id, event.model_dump_json()),
+            )
+
+    def save_decision(self, decision: AutonomyDecision) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO decisions (id, created_at, person_id, decision_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    decision.id,
+                    decision.created_at.isoformat(),
+                    decision.person_id,
+                    decision.model_dump_json(),
+                ),
+            )
+
+    def list_decisions(self, limit: int = 50) -> list[AutonomyDecision]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT decision_json FROM decisions ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [AutonomyDecision.model_validate_json(row["decision_json"]) for row in rows]
+
+    def save_research_report(self, report: ResearchReport) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT OR REPLACE INTO research_reports (id, created_at, status, report_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    report.id,
+                    report.created_at.isoformat(),
+                    report.status.value,
+                    report.model_dump_json(),
+                ),
+            )
+
+    def list_research_reports(self, limit: int = 50) -> list[ResearchReport]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT report_json FROM research_reports ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [ResearchReport.model_validate_json(row["report_json"]) for row in rows]
+
+    def save_audit(self, event_type: str, payload: dict[str, object]) -> AuditEvent:
+        event = AuditEvent(event_type=event_type, payload=payload)
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO audit_events (id, created_at, event_type, payload_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    event.id,
+                    event.created_at.isoformat(),
+                    event.event_type,
+                    json.dumps(event.payload, ensure_ascii=False),
+                ),
+            )
+        return event
+
+    def list_audit(self, limit: int = 100) -> list[AuditEvent]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT * FROM audit_events ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [
+            AuditEvent(
+                id=row["id"],
+                created_at=row["created_at"],
+                event_type=row["event_type"],
+                payload=json.loads(row["payload_json"]),
+            )
+            for row in rows
+        ]
+
     def save_snapshot(self, snapshot: AgentSnapshot) -> None:
         with self._lock, self.connection:
             self.connection.execute(
                 """
-                INSERT INTO agent_snapshot (singleton_id, state_json, profile_json)
-                VALUES (1, ?, ?)
+                INSERT INTO agent_snapshot (
+                    singleton_id, state_json, profile_json, emotion_json
+                ) VALUES (1, ?, ?, ?)
                 ON CONFLICT(singleton_id) DO UPDATE SET
                     state_json = excluded.state_json,
-                    profile_json = excluded.profile_json
+                    profile_json = excluded.profile_json,
+                    emotion_json = excluded.emotion_json
                 """,
-                (snapshot.state.model_dump_json(), snapshot.profile.model_dump_json()),
+                (
+                    snapshot.state.model_dump_json(),
+                    snapshot.profile.model_dump_json(),
+                    snapshot.emotion.model_dump_json(),
+                ),
             )
 
     def load_snapshot(self) -> AgentSnapshot | None:
         with self._lock:
             row = self.connection.execute(
                 """
-                SELECT state_json, profile_json FROM agent_snapshot
+                SELECT state_json, profile_json, emotion_json FROM agent_snapshot
                 WHERE singleton_id = 1
                 """
             ).fetchone()
         if row is None:
             return None
+        raw_emotion = row["emotion_json"] if "emotion_json" in row.keys() else "{}"
+        try:
+            emotion = EmotionState.model_validate_json(raw_emotion or "{}")
+        except ValueError:
+            emotion = EmotionState()
         return AgentSnapshot(
             state=AgentState.model_validate_json(row["state_json"]),
             profile=DevelopmentProfile.model_validate_json(row["profile_json"]),
+            emotion=emotion,
         )
 
     def reset(self) -> None:
         with self._lock, self.connection:
-            self.connection.execute("DELETE FROM evidence")
-            self.connection.execute("DELETE FROM beliefs")
-            self.connection.execute("DELETE FROM sources")
-            self.connection.execute("DELETE FROM memory_summaries")
-            self.connection.execute("DELETE FROM episodes")
-            self.connection.execute("DELETE FROM agent_snapshot")
+            for table in (
+                "trust_events",
+                "decisions",
+                "research_reports",
+                "audit_events",
+                "relationships",
+                "goals",
+                "genesis_events",
+                "identity",
+                "evidence",
+                "beliefs",
+                "sources",
+                "memory_summaries",
+                "episodes",
+                "agent_snapshot",
+            ):
+                self.connection.execute(f"DELETE FROM {table}")
 
     def close(self) -> None:
         with self._lock:

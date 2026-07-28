@@ -1,7 +1,7 @@
 [project]
 name = "digital-child"
-version = "0.2.0"
-description = "A measurable developmental core for a long-lived digital agent."
+version = "0.2.5"
+description = "Epistemic autonomy, identity, trust, research and animated terminal face for a long-lived digital agent."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -32,6 +32,7 @@ packages = ["src/digital_child"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 100
