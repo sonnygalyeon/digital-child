@@ -4,11 +4,13 @@ from digital_child.models import DevelopmentDomain, ExperienceAssessment, Observ
 
 
 class ExperienceEngine:
-    """Convert a raw observation into measurable developmental experience."""
+    """Convert an observation into measurable developmental experience."""
 
     def assess(self, observation: Observation) -> ExperienceAssessment:
-        confirmation_multiplier = 0.5 + 0.5 * observation.practical_confirmation
+        if observation.novelty is None:
+            raise ValueError("Observation novelty must be calculated before assessment")
 
+        confirmation_multiplier = 0.5 + 0.5 * observation.practical_confirmation
         factors = {
             "novelty": observation.novelty,
             "attention": observation.attention,
@@ -23,10 +25,9 @@ class ExperienceEngine:
             quality *= value
 
         effective_units = observation.raw_units * quality
-        total_weight = sum(observation.domains.values())
-
+        weight_sum = sum(observation.domains.values())
         domain_units: dict[DevelopmentDomain, float] = {
-            domain: effective_units * weight / total_weight
+            domain: effective_units * weight / weight_sum
             for domain, weight in observation.domains.items()
         }
 

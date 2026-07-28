@@ -5,11 +5,21 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from digital_child.models import AgentSnapshot, AgentState, DevelopmentProfile, Episode
+from digital_child.models import (
+    AgentSnapshot,
+    AgentState,
+    Belief,
+    DevelopmentProfile,
+    Episode,
+    EvidenceRecord,
+    MemorySummary,
+    SourceKind,
+    SourceRecord,
+)
 
 
 class SQLiteRepository:
-    """Persistent storage for episodic memory and the current agent snapshot."""
+    """Persistent storage for episodes, beliefs, evidence, sources and state."""
 
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = Path(database_path)
@@ -17,6 +27,7 @@ class SQLiteRepository:
         self._lock = threading.RLock()
         self.connection = sqlite3.connect(self.database_path, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
+        self.connection.execute("PRAGMA foreign_keys = ON")
         self._initialize()
 
     def _initialize(self) -> None:
@@ -25,18 +36,24 @@ class SQLiteRepository:
                 """
                 CREATE TABLE IF NOT EXISTS episodes (
                     id TEXT PRIMARY KEY,
+                    sequence INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     observation_id TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    normalized_content TEXT NOT NULL DEFAULT '',
                     action TEXT NOT NULL,
                     outcome TEXT NOT NULL,
                     reward REAL NOT NULL,
                     importance REAL NOT NULL,
                     effective_units REAL NOT NULL,
+                    access_strength REAL NOT NULL DEFAULT 1.0,
+                    last_decay_sequence INTEGER NOT NULL DEFAULT 0,
+                    archived INTEGER NOT NULL DEFAULT 0,
                     metadata_json TEXT NOT NULL
                 )
                 """
             )
+            self._ensure_episode_columns()
             self.connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS agent_snapshot (
@@ -46,76 +63,489 @@ class SQLiteRepository:
                 )
                 """
             )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sources (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    locator TEXT,
+                    reliability REAL NOT NULL,
+                    metadata_json TEXT NOT NULL
+                )
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS beliefs (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    claim TEXT NOT NULL,
+                    normalized_claim TEXT NOT NULL UNIQUE,
+                    confidence REAL NOT NULL,
+                    status TEXT NOT NULL,
+                    support_score REAL NOT NULL,
+                    contradiction_score REAL NOT NULL,
+                    evidence_count INTEGER NOT NULL,
+                    access_strength REAL NOT NULL,
+                    access_count INTEGER NOT NULL,
+                    last_accessed_sequence INTEGER NOT NULL,
+                    tags_json TEXT NOT NULL
+                )
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS evidence (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    belief_id TEXT NOT NULL REFERENCES beliefs(id) ON DELETE CASCADE,
+                    observation_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL REFERENCES sources(id),
+                    stance TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    weight REAL NOT NULL,
+                    excerpt TEXT NOT NULL
+                )
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_summaries (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    normalized_key TEXT NOT NULL UNIQUE,
+                    representative_text TEXT NOT NULL,
+                    episode_count INTEGER NOT NULL,
+                    total_deu REAL NOT NULL,
+                    mean_importance REAL NOT NULL
+                )
+                """
+            )
 
-    def save_episode(self, episode: Episode) -> None:
+    def _ensure_episode_columns(self) -> None:
+        columns = {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(episodes)")
+        }
+        definitions = {
+            "sequence": "INTEGER NOT NULL DEFAULT 0",
+            "normalized_content": "TEXT NOT NULL DEFAULT ''",
+            "access_strength": "REAL NOT NULL DEFAULT 1.0",
+            "last_decay_sequence": "INTEGER NOT NULL DEFAULT 0",
+            "archived": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, definition in definitions.items():
+            if name not in columns:
+                self.connection.execute(
+                    f"ALTER TABLE episodes ADD COLUMN {name} {definition}"
+                )
+
+    def current_sequence(self) -> int:
+        with self._lock:
+            value = self.connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) FROM episodes"
+            ).fetchone()[0]
+        return int(value)
+
+    def save_episode(self, episode: Episode) -> Episode:
+        sequence = self.current_sequence() + 1
+        stored = episode.model_copy(update={"sequence": sequence})
         with self._lock, self.connection:
             self.connection.execute(
                 """
                 INSERT INTO episodes (
-                    id,
-                    created_at,
-                    observation_id,
-                    content,
-                    action,
-                    outcome,
-                    reward,
-                    importance,
-                    effective_units,
-                    metadata_json
+                    id, sequence, created_at, observation_id, content,
+                    normalized_content, action, outcome, reward, importance,
+                    effective_units, access_strength, last_decay_sequence,
+                    archived, metadata_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    episode.id,
-                    episode.created_at.isoformat(),
-                    episode.observation_id,
-                    episode.content,
-                    episode.action,
-                    episode.outcome,
-                    episode.reward,
-                    episode.importance,
-                    episode.effective_units,
-                    json.dumps(episode.metadata, ensure_ascii=False),
+                    stored.id,
+                    stored.sequence,
+                    stored.created_at.isoformat(),
+                    stored.observation_id,
+                    stored.content,
+                    stored.normalized_content,
+                    stored.action,
+                    stored.outcome,
+                    stored.reward,
+                    stored.importance,
+                    stored.effective_units,
+                    stored.access_strength,
+                    stored.sequence,
+                    int(stored.archived),
+                    json.dumps(stored.metadata, ensure_ascii=False),
                 ),
             )
+        return stored
 
-    def recent_episodes(self, limit: int = 20) -> list[Episode]:
+    def recent_episodes(self, limit: int = 20, include_archived: bool = False) -> list[Episode]:
         if limit <= 0:
             return []
-
+        condition = "" if include_archived else "WHERE archived = 0"
         with self._lock:
             rows = self.connection.execute(
-                """
-                SELECT *
-                FROM episodes
-                ORDER BY created_at DESC
+                f"""
+                SELECT * FROM episodes
+                {condition}
+                ORDER BY sequence DESC
                 LIMIT ?
                 """,
                 (limit,),
             ).fetchall()
+        return [self._episode_from_row(row) for row in rows]
 
-        return [
-            Episode.model_validate(
-                {
-                    "id": row["id"],
-                    "created_at": row["created_at"],
-                    "observation_id": row["observation_id"],
-                    "content": row["content"],
-                    "action": row["action"],
-                    "outcome": row["outcome"],
-                    "reward": row["reward"],
-                    "importance": row["importance"],
-                    "effective_units": row["effective_units"],
-                    "metadata": json.loads(row["metadata_json"]),
-                }
+    @staticmethod
+    def _episode_from_row(row: sqlite3.Row) -> Episode:
+        return Episode.model_validate(
+            {
+                "id": row["id"],
+                "sequence": row["sequence"],
+                "created_at": row["created_at"],
+                "observation_id": row["observation_id"],
+                "content": row["content"],
+                "normalized_content": row["normalized_content"] or row["content"],
+                "action": row["action"],
+                "outcome": row["outcome"],
+                "reward": row["reward"],
+                "importance": row["importance"],
+                "effective_units": row["effective_units"],
+                "access_strength": row["access_strength"],
+                "archived": bool(row["archived"]),
+                "metadata": json.loads(row["metadata_json"]),
+            }
+        )
+
+    def save_source(self, source: SourceRecord) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO sources (
+                    id, created_at, kind, name, locator, reliability, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    kind = excluded.kind,
+                    name = excluded.name,
+                    locator = excluded.locator,
+                    reliability = excluded.reliability,
+                    metadata_json = excluded.metadata_json
+                """,
+                (
+                    source.id,
+                    source.created_at.isoformat(),
+                    source.kind.value,
+                    source.name,
+                    source.locator,
+                    source.reliability,
+                    json.dumps(source.metadata, ensure_ascii=False),
+                ),
             )
-            for row in rows
-        ]
+
+    def get_source(self, source_id: str) -> SourceRecord | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT * FROM sources WHERE id = ?", (source_id,)
+            ).fetchone()
+        return None if row is None else self._source_from_row(row)
+
+    def list_sources(self, limit: int = 100) -> list[SourceRecord]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT * FROM sources ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [self._source_from_row(row) for row in rows]
+
+    @staticmethod
+    def _source_from_row(row: sqlite3.Row) -> SourceRecord:
+        return SourceRecord.model_validate(
+            {
+                "id": row["id"],
+                "created_at": row["created_at"],
+                "kind": row["kind"],
+                "name": row["name"],
+                "locator": row["locator"],
+                "reliability": row["reliability"],
+                "metadata": json.loads(row["metadata_json"]),
+            }
+        )
+
+    def get_or_create_default_source(
+        self,
+        kind: SourceKind,
+        reliability: float,
+    ) -> SourceRecord:
+        source_id = f"default:{kind.value}"
+        existing = self.get_source(source_id)
+        if existing is not None:
+            if abs(existing.reliability - reliability) > 1e-12:
+                existing.reliability = reliability
+                self.save_source(existing)
+            return existing
+        source = SourceRecord(
+            id=source_id,
+            kind=kind,
+            name=f"Default {kind.value} source",
+            locator=source_id,
+            reliability=reliability,
+        )
+        self.save_source(source)
+        return source
+
+    def save_belief(self, belief: Belief) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO beliefs (
+                    id, created_at, updated_at, claim, normalized_claim,
+                    confidence, status, support_score, contradiction_score,
+                    evidence_count, access_strength, access_count,
+                    last_accessed_sequence, tags_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    claim = excluded.claim,
+                    confidence = excluded.confidence,
+                    status = excluded.status,
+                    support_score = excluded.support_score,
+                    contradiction_score = excluded.contradiction_score,
+                    evidence_count = excluded.evidence_count,
+                    access_strength = excluded.access_strength,
+                    access_count = excluded.access_count,
+                    last_accessed_sequence = excluded.last_accessed_sequence,
+                    tags_json = excluded.tags_json
+                """,
+                (
+                    belief.id,
+                    belief.created_at.isoformat(),
+                    belief.updated_at.isoformat(),
+                    belief.claim,
+                    belief.normalized_claim,
+                    belief.confidence,
+                    belief.status.value,
+                    belief.support_score,
+                    belief.contradiction_score,
+                    belief.evidence_count,
+                    belief.access_strength,
+                    belief.access_count,
+                    belief.last_accessed_sequence,
+                    json.dumps(belief.tags, ensure_ascii=False),
+                ),
+            )
+
+    def get_belief_by_normalized_claim(self, normalized_claim: str) -> Belief | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT * FROM beliefs WHERE normalized_claim = ?", (normalized_claim,)
+            ).fetchone()
+        return None if row is None else self._belief_from_row(row)
+
+    def list_beliefs(self, limit: int = 100) -> list[Belief]:
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM beliefs
+                ORDER BY access_strength DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._belief_from_row(row) for row in rows]
+
+    @staticmethod
+    def _belief_from_row(row: sqlite3.Row) -> Belief:
+        return Belief.model_validate(
+            {
+                "id": row["id"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "claim": row["claim"],
+                "normalized_claim": row["normalized_claim"],
+                "confidence": row["confidence"],
+                "status": row["status"],
+                "support_score": row["support_score"],
+                "contradiction_score": row["contradiction_score"],
+                "evidence_count": row["evidence_count"],
+                "access_strength": row["access_strength"],
+                "access_count": row["access_count"],
+                "last_accessed_sequence": row["last_accessed_sequence"],
+                "tags": json.loads(row["tags_json"]),
+            }
+        )
+
+    def save_evidence(self, evidence: EvidenceRecord) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO evidence (
+                    id, created_at, belief_id, observation_id, source_id,
+                    stance, confidence, weight, excerpt
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    evidence.id,
+                    evidence.created_at.isoformat(),
+                    evidence.belief_id,
+                    evidence.observation_id,
+                    evidence.source_id,
+                    evidence.stance.value,
+                    evidence.confidence,
+                    evidence.weight,
+                    evidence.excerpt,
+                ),
+            )
+
+    def evidence_for_belief(self, belief_id: str, limit: int = 100) -> list[EvidenceRecord]:
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM evidence
+                WHERE belief_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (belief_id, limit),
+            ).fetchall()
+        return [EvidenceRecord.model_validate(dict(row)) for row in rows]
+
+    def apply_interference_decay(
+        self,
+        current_sequence: int,
+        decay_per_episode: float,
+        archive_threshold: float,
+    ) -> tuple[int, int]:
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT id, sequence, access_strength, importance, last_decay_sequence
+                FROM episodes
+                WHERE archived = 0
+                """
+            ).fetchall()
+
+        decayed = 0
+        archived = 0
+        with self._lock, self.connection:
+            for row in rows:
+                last_sequence = max(int(row["sequence"]), int(row["last_decay_sequence"]))
+                interference = max(0, current_sequence - last_sequence)
+                if interference == 0:
+                    continue
+                protection = 0.35 + 0.65 * float(row["importance"])
+                loss = interference * decay_per_episode * (1.0 - 0.6 * protection)
+                strength = max(0.0, float(row["access_strength"]) - loss)
+                is_archived = strength < archive_threshold
+                self.connection.execute(
+                    """
+                    UPDATE episodes
+                    SET access_strength = ?, last_decay_sequence = ?, archived = ?
+                    WHERE id = ?
+                    """,
+                    (strength, current_sequence, int(is_archived), row["id"]),
+                )
+                decayed += 1
+                archived += int(is_archived)
+        return decayed, archived
+
+    def consolidate_repeated_episodes(self, minimum_repetitions: int = 3) -> tuple[int, int]:
+        with self._lock:
+            groups = self.connection.execute(
+                """
+                SELECT normalized_content, COUNT(*) AS count,
+                       SUM(effective_units) AS total_deu,
+                       AVG(importance) AS mean_importance,
+                       MAX(sequence) AS newest_sequence
+                FROM episodes
+                WHERE normalized_content <> ''
+                GROUP BY normalized_content
+                HAVING COUNT(*) >= ?
+                """,
+                (minimum_repetitions,),
+            ).fetchall()
+
+        created = 0
+        updated = 0
+        with self._lock, self.connection:
+            for group in groups:
+                representative = self.connection.execute(
+                    """
+                    SELECT content FROM episodes
+                    WHERE normalized_content = ?
+                    ORDER BY sequence DESC LIMIT 1
+                    """,
+                    (group["normalized_content"],),
+                ).fetchone()["content"]
+                existing = self.connection.execute(
+                    "SELECT id FROM memory_summaries WHERE normalized_key = ?",
+                    (group["normalized_content"],),
+                ).fetchone()
+                summary = MemorySummary(
+                    id=existing["id"] if existing else MemorySummary(
+                        normalized_key=group["normalized_content"],
+                        representative_text=representative,
+                        episode_count=group["count"],
+                        total_deu=group["total_deu"],
+                        mean_importance=group["mean_importance"],
+                    ).id,
+                    normalized_key=group["normalized_content"],
+                    representative_text=representative,
+                    episode_count=group["count"],
+                    total_deu=group["total_deu"],
+                    mean_importance=group["mean_importance"],
+                )
+                self.connection.execute(
+                    """
+                    INSERT INTO memory_summaries (
+                        id, created_at, updated_at, normalized_key,
+                        representative_text, episode_count, total_deu, mean_importance
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(normalized_key) DO UPDATE SET
+                        updated_at = excluded.updated_at,
+                        representative_text = excluded.representative_text,
+                        episode_count = excluded.episode_count,
+                        total_deu = excluded.total_deu,
+                        mean_importance = excluded.mean_importance
+                    """,
+                    (
+                        summary.id,
+                        summary.created_at.isoformat(),
+                        summary.updated_at.isoformat(),
+                        summary.normalized_key,
+                        summary.representative_text,
+                        summary.episode_count,
+                        summary.total_deu,
+                        summary.mean_importance,
+                    ),
+                )
+                if existing:
+                    updated += 1
+                else:
+                    created += 1
+                self.connection.execute(
+                    """
+                    UPDATE episodes SET archived = 1
+                    WHERE normalized_content = ? AND sequence <> ?
+                    """,
+                    (group["normalized_content"], group["newest_sequence"]),
+                )
+        return created, updated
+
+    def list_memory_summaries(self, limit: int = 100) -> list[MemorySummary]:
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM memory_summaries
+                ORDER BY updated_at DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [MemorySummary.model_validate(dict(row)) for row in rows]
 
     def save_snapshot(self, snapshot: AgentSnapshot) -> None:
-        state_json = snapshot.state.model_dump_json()
-        profile_json = snapshot.profile.model_dump_json()
-
         with self._lock, self.connection:
             self.connection.execute(
                 """
@@ -125,22 +555,19 @@ class SQLiteRepository:
                     state_json = excluded.state_json,
                     profile_json = excluded.profile_json
                 """,
-                (state_json, profile_json),
+                (snapshot.state.model_dump_json(), snapshot.profile.model_dump_json()),
             )
 
     def load_snapshot(self) -> AgentSnapshot | None:
         with self._lock:
             row = self.connection.execute(
                 """
-                SELECT state_json, profile_json
-                FROM agent_snapshot
+                SELECT state_json, profile_json FROM agent_snapshot
                 WHERE singleton_id = 1
                 """
             ).fetchone()
-
         if row is None:
             return None
-
         return AgentSnapshot(
             state=AgentState.model_validate_json(row["state_json"]),
             profile=DevelopmentProfile.model_validate_json(row["profile_json"]),
@@ -148,6 +575,10 @@ class SQLiteRepository:
 
     def reset(self) -> None:
         with self._lock, self.connection:
+            self.connection.execute("DELETE FROM evidence")
+            self.connection.execute("DELETE FROM beliefs")
+            self.connection.execute("DELETE FROM sources")
+            self.connection.execute("DELETE FROM memory_summaries")
             self.connection.execute("DELETE FROM episodes")
             self.connection.execute("DELETE FROM agent_snapshot")
 

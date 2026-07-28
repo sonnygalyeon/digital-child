@@ -17,7 +17,7 @@ class StageRule:
     minimum_domains: dict[DevelopmentDomain, float]
 
 
-STAGE_RULES: tuple[tuple[DevelopmentStage, StageRule], ...] = (
+STAGE_RULES: list[tuple[DevelopmentStage, StageRule]] = [
     (
         DevelopmentStage.MATURE,
         StageRule(
@@ -62,12 +62,10 @@ STAGE_RULES: tuple[tuple[DevelopmentStage, StageRule], ...] = (
             },
         ),
     ),
-)
+]
 
 
 class DevelopmentEngine:
-    """Apply experience to a profile and resolve the current stage."""
-
     def apply(
         self,
         profile: DevelopmentProfile,
@@ -80,8 +78,7 @@ class DevelopmentEngine:
             profile.domain_experience.setdefault(domain, 0.0)
             profile.domain_experience[domain] += gained
 
-        profile.stage = self.resolve_stage(profile)
-
+        profile.stage = self._resolve_stage(profile)
         return DevelopmentTransition(
             old_stage=old_stage,
             new_stage=profile.stage,
@@ -89,7 +86,7 @@ class DevelopmentEngine:
             domain_gains=assessment.domain_units,
         )
 
-    def resolve_stage(self, profile: DevelopmentProfile) -> DevelopmentStage:
+    def _resolve_stage(self, profile: DevelopmentProfile) -> DevelopmentStage:
         for stage, rule in STAGE_RULES:
             if profile.total_deu < rule.total_deu:
                 continue
