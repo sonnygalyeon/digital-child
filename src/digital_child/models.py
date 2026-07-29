@@ -114,6 +114,12 @@ class EmotionName(str, Enum):
     WARY = "wary"
 
 
+class ConversationRole(str, Enum):
+    USER = "user"
+    AGENT = "agent"
+    SYSTEM = "system"
+
+
 def empty_domain_experience() -> dict[DevelopmentDomain, float]:
     return {domain: 0.0 for domain in DevelopmentDomain}
 
@@ -403,6 +409,29 @@ class EmotionState(StrictModel):
     fatigue: Probability = 0.0
     social_need: Probability = 0.5
     dominant: EmotionName = EmotionName.NEUTRAL
+
+
+class ConversationMessage(StrictModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    person_id: str = Field(min_length=1, max_length=200)
+    role: ConversationRole
+    content: str = Field(min_length=1, max_length=100_000)
+    intent: MessageIntent | None = None
+    decision_id: str | None = None
+    backend: str | None = None
+    model: str | None = None
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class LLMHealth(StrictModel):
+    enabled: bool
+    healthy: bool
+    backend: str
+    model: str
+    base_url: str | None = None
+    supports_streaming: bool = False
+    detail: str = ""
 
 
 class DevelopmentTransition(StrictModel):

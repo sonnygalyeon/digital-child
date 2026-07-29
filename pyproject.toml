@@ -1,7 +1,7 @@
 [project]
 name = "digital-child"
-version = "0.2.5"
-description = "Epistemic autonomy, identity, trust, research and animated terminal face for a long-lived digital agent."
+version = "0.3.0"
+description = "Full streaming LLM integration with persistent cognitive context for a long-lived autonomous digital agent."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [

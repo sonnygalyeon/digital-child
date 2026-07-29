@@ -11,27 +11,30 @@ from digital_child.terminal_face import TerminalFaceRenderer
 
 
 class TerminalFaceApp:
-    """Curses UI whose face keeps animating while idle and while work runs in a thread."""
+    """Curses UI with independent idle animation and streaming LLM output."""
 
     def __init__(
         self,
         *,
         handler: Callable[[str], str],
         emotion_getter: Callable[[], EmotionState],
+        stream_handler: Callable[[str, Callable[[str], None]], str] | None = None,
         opening_lines: list[str] | None = None,
         ascii_only: bool = False,
         fps: float = 12.0,
     ) -> None:
         self.handler = handler
+        self.stream_handler = stream_handler
         self.emotion_getter = emotion_getter
         self.opening_lines = opening_lines or []
         self.renderer = TerminalFaceRenderer(ascii_only=ascii_only)
         self.frame_delay = 1.0 / max(2.0, min(fps, 30.0))
         self.messages: list[str] = list(self.opening_lines)
         self.input_buffer = ""
+        self.partial_response = ""
         self.busy = False
         self.stopped = False
-        self.result_queue: queue.Queue[str] = queue.Queue()
+        self.event_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self.speaking_until = 0.0
 
     def run(self) -> None:
@@ -53,7 +56,7 @@ class TerminalFaceApp:
 
         tick = 0
         while not self.stopped:
-            self._collect_worker_result()
+            self._collect_worker_events()
             key = screen.getch()
             self._handle_key(key)
             self._draw(screen, tick)
@@ -63,7 +66,7 @@ class TerminalFaceApp:
     def _handle_key(self, key: int) -> None:
         if key == -1:
             return
-        if key in {3, 4}:  # Ctrl-C / Ctrl-D
+        if key in {3, 4}:
             self.stopped = True
             return
         if key in {curses.KEY_BACKSPACE, 127, 8}:
@@ -82,6 +85,7 @@ class TerminalFaceApp:
                 self.messages.append("Система: дождитесь завершения текущего размышления.")
                 return
             self.busy = True
+            self.partial_response = ""
             threading.Thread(target=self._worker, args=(text,), daemon=True).start()
             return
         if 0 <= key <= 0x10FFFF:
@@ -94,20 +98,38 @@ class TerminalFaceApp:
 
     def _worker(self, text: str) -> None:
         try:
-            result = self.handler(text)
-        except Exception as exc:  # terminal boundary must survive backend failures
+            if self.stream_handler is not None and not text.startswith("/"):
+                result = self.stream_handler(
+                    text,
+                    lambda token: self.event_queue.put(("token", token)),
+                )
+            else:
+                result = self.handler(text)
+        except Exception as exc:
             result = f"Ошибка обработки: {exc}"
-        self.result_queue.put(result)
+        self.event_queue.put(("done", result))
 
-    def _collect_worker_result(self) -> None:
-        try:
-            result = self.result_queue.get_nowait()
-        except queue.Empty:
-            return
-        self.busy = False
-        self.speaking_until = time.monotonic() + 1.4
-        for line in result.splitlines() or [result]:
-            self.messages.append(f"Агент: {line}")
+    def _collect_worker_events(self) -> None:
+        while True:
+            try:
+                event, payload = self.event_queue.get_nowait()
+            except queue.Empty:
+                return
+            if event == "token":
+                self.partial_response += payload
+                self.speaking_until = time.monotonic() + 0.25
+                continue
+            if event == "done":
+                self.busy = False
+                self.speaking_until = time.monotonic() + 1.0
+                if self.partial_response.strip():
+                    self.messages.append(f"Агент: {self.partial_response.strip()}")
+                    if payload.strip():
+                        self.messages.extend(payload.splitlines())
+                else:
+                    for line in payload.splitlines() or [payload]:
+                        self.messages.append(f"Агент: {line}")
+                self.partial_response = ""
 
     def _draw(self, screen: curses.window, tick: int) -> None:
         height, width = screen.getmaxyx()
@@ -118,9 +140,9 @@ class TerminalFaceApp:
             return
 
         override = None
-        if self.busy:
+        if self.busy and not self.partial_response:
             override = EmotionName.THINKING
-        elif time.monotonic() < self.speaking_until:
+        elif self.partial_response or time.monotonic() < self.speaking_until:
             override = EmotionName.SPEAKING
         elif self.input_buffer:
             override = EmotionName.LISTENING
@@ -134,17 +156,26 @@ class TerminalFaceApp:
             self._safe_add(screen, row, face_x, line, color)
 
         status_y = len(frame.lines)
+        if self.partial_response:
+            process_label = "ГЕНЕРАЦИЯ"
+        elif self.busy:
+            process_label = "РАЗМЫШЛЕНИЕ / ПОИСК"
+        else:
+            process_label = "IDLE"
         status = (
             f"[ {frame.expression.value.upper()} ]  энергия={1-emotion.fatigue:.2f}  "
             f"любопытство={emotion.curiosity:.2f}  доверие={emotion.trust:.2f}  "
-            f"{'РАЗМЫШЛЕНИЕ' if self.busy else 'IDLE'}"
+            f"{process_label}"
         )
         self._safe_add(screen, status_y, max(0, (width - len(status)) // 2), status)
 
         prompt_y = height - 2
         log_start = status_y + 2
         max_log_lines = max(1, prompt_y - log_start - 1)
-        for index, message in enumerate(self.messages[-max_log_lines:]):
+        visible = list(self.messages)
+        if self.partial_response:
+            visible.append(f"Агент: {self.partial_response}▌")
+        for index, message in enumerate(visible[-max_log_lines:]):
             self._safe_add(screen, log_start + index, 1, message[: width - 2])
 
         prompt = f"> {self.input_buffer}"

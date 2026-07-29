@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from digital_child.agent import DigitalChildAgent
+from digital_child.config import load_dotenv
 from digital_child.llm import CognitiveBackend, build_cognitive_backend
 from digital_child.research import SearchProvider, build_search_provider
 from digital_child.storage import SQLiteRepository
@@ -16,6 +17,7 @@ def create_agent(
     cognitive_backend: CognitiveBackend | None = None,
     auto_research: bool | None = None,
 ) -> DigitalChildAgent:
+    load_dotenv()
     path = Path(database_path or os.environ.get("DIGITAL_CHILD_DB", "data/digital_child.db"))
     if auto_research is None:
         auto_research = os.environ.get("DIGITAL_CHILD_AUTO_RESEARCH", "1").lower() not in {
