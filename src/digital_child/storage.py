@@ -11,6 +11,8 @@ from digital_child.models import (
     AuditEvent,
     AutonomyDecision,
     Belief,
+    ConversationMessage,
+    ConversationRole,
     DevelopmentProfile,
     EmotionState,
     Episode,
@@ -211,6 +213,28 @@ class SQLiteRepository:
                     event_type TEXT NOT NULL,
                     payload_json TEXT NOT NULL
                 )
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversation_messages (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    person_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    intent TEXT,
+                    decision_id TEXT,
+                    backend TEXT,
+                    model TEXT,
+                    metadata_json TEXT NOT NULL
+                )
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_conversation_person_created
+                ON conversation_messages(person_id, created_at)
                 """
             )
 
@@ -849,6 +873,63 @@ class SQLiteRepository:
             for row in rows
         ]
 
+    def save_conversation_message(self, message: ConversationMessage) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO conversation_messages (
+                    id, created_at, person_id, role, content, intent,
+                    decision_id, backend, model, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message.id,
+                    message.created_at.isoformat(),
+                    message.person_id,
+                    message.role.value,
+                    message.content,
+                    None if message.intent is None else message.intent.value,
+                    message.decision_id,
+                    message.backend,
+                    message.model,
+                    json.dumps(message.metadata, ensure_ascii=False),
+                ),
+            )
+
+    def recent_conversation(
+        self,
+        person_id: str,
+        limit: int = 20,
+    ) -> list[ConversationMessage]:
+        if limit <= 0:
+            return []
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM conversation_messages
+                WHERE person_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (person_id, limit),
+            ).fetchall()
+        messages = [
+            ConversationMessage(
+                id=row["id"],
+                created_at=row["created_at"],
+                person_id=row["person_id"],
+                role=ConversationRole(row["role"]),
+                content=row["content"],
+                intent=None if row["intent"] is None else row["intent"],
+                decision_id=row["decision_id"],
+                backend=row["backend"],
+                model=row["model"],
+                metadata=json.loads(row["metadata_json"]),
+            )
+            for row in rows
+        ]
+        return list(reversed(messages))
+
     def save_snapshot(self, snapshot: AgentSnapshot) -> None:
         with self._lock, self.connection:
             self.connection.execute(
@@ -892,6 +973,7 @@ class SQLiteRepository:
     def reset(self) -> None:
         with self._lock, self.connection:
             for table in (
+                "conversation_messages",
                 "trust_events",
                 "decisions",
                 "research_reports",

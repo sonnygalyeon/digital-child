@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from digital_child.autonomy import AutonomyEngine
 from digital_child.awakening import AwakeningEngine
 from digital_child.beliefs import BeliefEngine
@@ -10,12 +12,15 @@ from digital_child.emotions import EmotionEngine
 from digital_child.epistemics import EpistemicEngine, VerificationPolicy
 from digital_child.experience import ExperienceEngine
 from digital_child.intentions import IntentClassifier
-from digital_child.llm import CognitiveBackend, ReplyContext, RuleBasedBackend
+from digital_child.llm import CognitiveBackend, RuleBasedBackend
+from digital_child.llm_types import ReplyContext
 from digital_child.models import (
     AgentSnapshot,
     AgentState,
     BeliefUpdate,
     ConsolidationReport,
+    ConversationMessage,
+    ConversationRole,
     CycleResult,
     DevelopmentDomain,
     DevelopmentProfile,
@@ -159,8 +164,18 @@ class DigitalChildAgent:
         *,
         person_id: str = "local-user",
         force_research: bool = False,
+        on_token: Callable[[str], None] | None = None,
     ) -> InteractionResult:
         analysis = self.intent_classifier.analyze(text)
+        conversation_history = self.repository.recent_conversation(person_id, 12)
+        self.repository.save_conversation_message(
+            ConversationMessage(
+                person_id=person_id,
+                role=ConversationRole.USER,
+                content=text,
+                intent=analysis.intent,
+            )
+        )
         relationship = self.trust_engine.get_or_create(person_id)
         relationship = self.trust_engine.register_interaction(relationship)
 
@@ -279,12 +294,41 @@ class DigitalChildAgent:
             emotion=self.emotion,
             research_summary=None if research is None else research.summary,
             personal_memory_summary=self._memory_summary(),
+            beliefs_summary=self._beliefs_summary(),
+            conversation_history=conversation_history,
+            development_stage=self.profile.stage.value,
+            total_deu=self.profile.total_deu,
         )
         try:
-            response = self.cognitive_backend.generate_reply(context)
+            if on_token is not None and self.cognitive_backend.supports_streaming:
+                chunks: list[str] = []
+                for token in self.cognitive_backend.stream_reply(context):
+                    chunks.append(token)
+                    on_token(token)
+                response = "".join(chunks).strip()
+            else:
+                response = self.cognitive_backend.generate_reply(context)
         except RuntimeError as exc:
             response = RuleBasedBackend().generate_reply(context)
             response += f" [Когнитивный backend недоступен: {exc}]"
+            if on_token is not None:
+                on_token(response)
+
+        self.repository.save_conversation_message(
+            ConversationMessage(
+                person_id=person_id,
+                role=ConversationRole.AGENT,
+                content=response,
+                intent=analysis.intent,
+                decision_id=decision.id,
+                backend=self.cognitive_backend.name,
+                model=self.cognitive_backend.model,
+                metadata={
+                    "research_status": None if research is None else research.status.value,
+                    "emotion": self.emotion.dominant.value,
+                },
+            )
+        )
 
         self.repository.save_audit(
             "interaction",
@@ -400,6 +444,18 @@ class DigitalChildAgent:
     def _persist_snapshot(self) -> None:
         self.repository.save_snapshot(
             AgentSnapshot(state=self.state, profile=self.profile, emotion=self.emotion)
+        )
+
+    def llm_health(self):
+        return self.cognitive_backend.health_check()
+
+    def _beliefs_summary(self) -> str:
+        beliefs = self.repository.list_beliefs(8)
+        if not beliefs:
+            return "Собственных убеждений пока почти нет."
+        return " | ".join(
+            f"[{belief.status.value} p={belief.confidence:.2f}] {belief.claim[:180]}"
+            for belief in beliefs
         )
 
     def _memory_summary(self) -> str:

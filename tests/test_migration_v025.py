@@ -57,3 +57,16 @@ def test_v02_database_is_extended_without_deleting_old_tables(tmp_path: Path) ->
     assert "emotion_json" in snapshot_columns
 
     repository.close()
+
+
+def test_v025_database_gains_conversation_history_table(tmp_path: Path) -> None:
+    path = tmp_path / "v025.db"
+    repository = SQLiteRepository(path)
+    tables = {
+        row[0]
+        for row in repository.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert "conversation_messages" in tables
+    repository.close()

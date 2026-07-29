@@ -51,6 +51,8 @@ def build_caregiver_observation(
 HELP_TEXT = """Команды:
   /help                         показать справку
   /state                        развитие, состояние и психологический возраст
+  /llm                          состояние подключения полноценной LLM
+  /history [N]                  сохранённая история диалога
   /identity                     самомодель и вопросы первого пробуждения
   /goals [N]                    собственные активные цели
   /trust                        отношение к локальному собеседнику
@@ -100,6 +102,18 @@ class ChatCommandRouter:
                 "research_provider": self.agent.research_engine.provider.name,
             }
             return json.dumps(payload, ensure_ascii=False, indent=2)
+        if text == "/llm":
+            return self.agent.llm_health().model_dump_json(indent=2)
+        if text.startswith("/history"):
+            limit = _parse_limit(text, 20)
+            if limit is None:
+                return "Количество должно быть целым числом."
+            messages = self.agent.repository.recent_conversation(self.person_id, limit)
+            if not messages:
+                return "История диалога пока пуста."
+            return "\n".join(
+                f"- [{item.role.value}] {item.content}" for item in messages
+            )
         if text == "/identity":
             return self.agent.identity.model_dump_json(indent=2)
         if text.startswith("/goals"):
@@ -246,14 +260,23 @@ class ChatCommandRouter:
             self.agent.interact(text, person_id=self.person_id)
         )
 
+    def handle_stream(self, text: str, on_token) -> str:
+        if text.startswith("/"):
+            return self.handle(text)
+        result = self.agent.interact(
+            text,
+            person_id=self.person_id,
+            on_token=on_token,
+        )
+        return self._format_interaction_metadata(result)
+
     @staticmethod
-    def _format_interaction(result) -> str:
-        lines = [result.response]
-        lines.append(
+    def _format_interaction_metadata(result) -> str:
+        lines = [
             f"[решение={result.decision.decision.value}; "
             f"намерение={result.analysis.intent.value}; "
             f"эмоция={result.emotion.dominant.value}]"
-        )
+        ]
         if result.research is not None:
             lines.append(
                 f"[проверка={result.research.status.value}] {result.research.summary}"
@@ -267,6 +290,12 @@ class ChatCommandRouter:
                 f"уверенность={result.deception.confidence_in_assessment:.2f}"
             )
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_interaction(result) -> str:
+        metadata = ChatCommandRouter._format_interaction_metadata(result)
+        return f"{result.response}\n{metadata}"
+
 
 
 def _opening_lines(agent) -> list[str]:
@@ -314,6 +343,7 @@ def run_face_chat(
     router = ChatCommandRouter(agent)
     app = TerminalFaceApp(
         handler=router.handle,
+        stream_handler=router.handle_stream,
         emotion_getter=lambda: agent.emotion,
         opening_lines=_opening_lines(agent),
         ascii_only=ascii_only,
@@ -327,7 +357,7 @@ def run_face_chat(
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="digital-child",
-        description="Digital Child v0.2.5: epistemic autonomy and animated terminal identity.",
+        description="Digital Child v0.3.0: full streaming LLM and persistent cognitive context.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -340,6 +370,9 @@ def main() -> None:
         action="store_true",
         help="Не запускать поиск автоматически для фактических утверждений",
     )
+
+    llm_parser = subparsers.add_parser("llm", help="Проверить подключение LLM")
+    llm_parser.add_argument("--db", type=Path, default=Path("data/digital_child.db"))
 
     serve_parser = subparsers.add_parser("serve", help="Запустить HTTP API")
     serve_parser.add_argument("--host", default="127.0.0.1")
@@ -357,6 +390,13 @@ def main() -> None:
             )
         else:
             run_simple_chat(args.db, auto_research=auto_research)
+        return
+    if args.command == "llm":
+        agent = create_agent(args.db)
+        try:
+            print(agent.llm_health().model_dump_json(indent=2))
+        finally:
+            agent.repository.close()
         return
     if args.command == "serve":
         uvicorn.run("digital_child.api:app", host=args.host, port=args.port, reload=False)

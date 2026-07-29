@@ -23,6 +23,8 @@ from digital_child.models import (
     Goal,
     IdentityProfile,
     InteractionResult,
+    ConversationMessage,
+    LLMHealth,
     MemorySummary,
     Observation,
     RelationshipProfile,
@@ -58,8 +60,8 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
 
     application = FastAPI(
         title="Digital Child API",
-        version="0.2.5",
-        description="Epistemic autonomy, identity, research, trust and terminal emotion core.",
+        version="0.3.0",
+        description="Full LLM integration, streaming cognition, autonomy, memory and epistemic verification.",
         lifespan=lifespan,
     )
 
@@ -80,7 +82,7 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
 
     @application.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "version": "0.2.5"}
+        return {"status": "ok", "version": "0.3.0"}
 
     @application.get("/v1/state", response_model=StateResponse)
     def get_state(request: Request) -> StateResponse:
@@ -90,6 +92,17 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             profile=agent.profile,
             emotion=agent.emotion,
             psychological_age_equivalent=psychological_age_equivalent(agent.profile),
+        )
+
+    @application.get("/v1/llm", response_model=LLMHealth)
+    def llm_health(request: Request) -> LLMHealth:
+        return get_agent(request).llm_health()
+
+    @application.get("/v1/conversation/{person_id}", response_model=list[ConversationMessage])
+    def conversation(person_id: str, request: Request, limit: int = 50) -> list[ConversationMessage]:
+        return get_agent(request).repository.recent_conversation(
+            person_id,
+            max(1, min(limit, 500)),
         )
 
     @application.get("/v1/identity", response_model=IdentityProfile)
