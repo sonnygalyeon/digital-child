@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: digital-child-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: digital_child_host
+      POSTGRES_USER: digital_child
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - digital_child_postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U digital_child -d digital_child_host"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  digital_child_postgres_data:

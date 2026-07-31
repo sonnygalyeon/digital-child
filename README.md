@@ -103,3 +103,10 @@ LLM является языковым и рассуждающим процесс
 ```
 
 Подробная настройка: [`docs/LLM_SETUP_MACOS.md`](docs/LLM_SETUP_MACOS.md).
+
+## Windows LLM host
+
+A separate `windows-llm-host` branch can run the LLM on a Windows PC while the personality,
+memory and terminal interface stay on the Mac or Raspberry Pi. The host includes an API-key
+gateway and optional PostgreSQL audit storage. See
+[`docs/WINDOWS_LLM_HOST.md`](docs/WINDOWS_LLM_HOST.md).
