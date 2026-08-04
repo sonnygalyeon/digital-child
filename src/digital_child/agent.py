@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import threading
 
 from digital_child.autonomy import AutonomyEngine
 from digital_child.awakening import AwakeningEngine
@@ -55,6 +56,7 @@ class DigitalChildAgent:
         search_provider: SearchProvider | None = None,
         cognitive_backend: CognitiveBackend | None = None,
         auto_research: bool = True,
+        research_mode: str = "blocking",
     ) -> None:
         self.repository = repository
         self.experience_engine = ExperienceEngine()
@@ -75,6 +77,8 @@ class DigitalChildAgent:
             self.cognitive_backend,
         )
         self.auto_research = auto_research
+        self.research_mode = research_mode if research_mode in {"blocking", "background", "manual"} else "background"
+        self.background_notifier: Callable[[str], None] | None = None
 
         snapshot = repository.load_snapshot()
         if snapshot is None:
@@ -167,7 +171,11 @@ class DigitalChildAgent:
         on_token: Callable[[str], None] | None = None,
     ) -> InteractionResult:
         analysis = self.intent_classifier.analyze(text)
-        conversation_history = self.repository.recent_conversation(person_id, 12)
+        from digital_child.config import env_int
+
+        conversation_history = self.repository.recent_conversation(
+            person_id, env_int("DIGITAL_CHILD_LLM_HISTORY_MESSAGES", 6)
+        )
         self.repository.save_conversation_message(
             ConversationMessage(
                 person_id=person_id,
@@ -214,6 +222,7 @@ class DigitalChildAgent:
 
         belief_updates: list[BeliefUpdate] = []
         research = None
+        research_pending = False
         if analysis.intent == MessageIntent.CLAIM and analysis.extracted_claim:
             user_update = self.epistemic_engine.record_user_claim(
                 claim=analysis.extracted_claim,
@@ -224,36 +233,16 @@ class DigitalChildAgent:
             belief_updates.append(user_update)
 
             if verification_required and (self.auto_research or force_research):
-                research = self.research_engine.research(analysis.extracted_claim)
-                self.repository.save_research_report(research)
-                for result in research.results:
-                    self.process_observation(
-                        Observation(
-                            content=result.snippet or result.title,
-                            source_kind=SourceKind.WEB,
-                            raw_units=float(max(1, len((result.snippet or result.title).split()))),
-                            novelty=None,
-                            attention=self.state.attention_capacity,
-                            comprehension=0.65,
-                            reliability=result.source_reliability,
-                            integration=0.55,
-                            practical_confirmation=0.0,
-                            domains={
-                                DevelopmentDomain.FACTUAL_KNOWLEDGE: 0.60,
-                                DevelopmentDomain.CAUSAL_REASONING: 0.20,
-                                DevelopmentDomain.METACOGNITION: 0.20,
-                            },
-                            tags=["research_consumption", result.provider],
-                        ),
-                        action="web_research",
-                        outcome="source_read",
+                if self.research_mode == "background" and not force_research:
+                    research_pending = True
+                elif self.research_mode != "manual" or force_research:
+                    research = self._perform_research(analysis.extracted_claim)
+                    belief_updates.extend(
+                        self.epistemic_engine.apply_research_report(
+                            research,
+                            current_sequence=self.repository.current_sequence(),
+                        )
                     )
-                belief_updates.extend(
-                    self.epistemic_engine.apply_research_report(
-                        research,
-                        current_sequence=self.repository.current_sequence(),
-                    )
-                )
 
         supported = bool(
             research
@@ -292,7 +281,11 @@ class DigitalChildAgent:
             relationship=relationship,
             goals=goals,
             emotion=self.emotion,
-            research_summary=None if research is None else research.summary,
+            research_summary=(
+                "Проверка поставлена в фоновую очередь; утверждение пока не подтверждено."
+                if research_pending
+                else (None if research is None else research.summary)
+            ),
             personal_memory_summary=self._memory_summary(),
             beliefs_summary=self._beliefs_summary(),
             conversation_history=conversation_history,
@@ -342,6 +335,8 @@ class DigitalChildAgent:
             },
         )
         self._persist_snapshot()
+        if research_pending and analysis.extracted_claim:
+            self._schedule_background_research(analysis.extracted_claim, person_id)
         return InteractionResult(
             analysis=analysis,
             decision=decision,
@@ -351,6 +346,52 @@ class DigitalChildAgent:
             emotion=self.emotion,
             response=response,
         )
+
+    def set_background_notifier(self, notifier: Callable[[str], None] | None) -> None:
+        self.background_notifier = notifier
+
+    def _perform_research(self, claim: str):
+        research = self.research_engine.research(claim)
+        self.repository.save_research_report(research)
+        return research
+
+    def _schedule_background_research(self, claim: str, person_id: str) -> None:
+        def worker() -> None:
+            report = self._perform_research(claim)
+            self.epistemic_engine.apply_research_report(
+                report, current_sequence=self.repository.current_sequence()
+            )
+            supported = any(
+                judgment.stance.value == "support" for judgment in report.judgments
+            )
+            contradicted = any(
+                judgment.stance.value == "contradict" for judgment in report.judgments
+            )
+            if supported or contradicted:
+                relationship = self.trust_engine.get_or_create(person_id)
+                self.trust_engine.apply_verification_outcome(
+                    relationship, supported=supported, contradicted=contradicted
+                )
+            self.repository.save_audit(
+                "background_research_complete",
+                {
+                    "person_id": person_id,
+                    "claim": claim,
+                    "status": report.status.value,
+                    "summary": report.summary,
+                },
+            )
+            if self.background_notifier is not None:
+                self.background_notifier(
+                    f"Фоновая проверка завершена [{report.status.value}]: "
+                    f"{claim} — {report.summary}"
+                )
+
+        threading.Thread(
+            target=worker,
+            name="digital-child-research",
+            daemon=True,
+        ).start()
 
     def research_claim(self, claim: str, person_id: str = "local-user") -> InteractionResult:
         return self.interact(claim, person_id=person_id, force_research=True)
@@ -450,7 +491,8 @@ class DigitalChildAgent:
         return self.cognitive_backend.health_check()
 
     def _beliefs_summary(self) -> str:
-        beliefs = self.repository.list_beliefs(8)
+        from digital_child.config import env_int
+        beliefs = self.repository.list_beliefs(env_int("DIGITAL_CHILD_LLM_BELIEF_ITEMS", 4))
         if not beliefs:
             return "Собственных убеждений пока почти нет."
         return " | ".join(
@@ -459,7 +501,8 @@ class DigitalChildAgent:
         )
 
     def _memory_summary(self) -> str:
-        episodes = self.repository.recent_episodes(5)
+        from digital_child.config import env_int
+        episodes = self.repository.recent_episodes(env_int("DIGITAL_CHILD_LLM_MEMORY_ITEMS", 4))
         if not episodes:
             return "Личная история пока почти пуста."
         return " | ".join(episode.content[:160] for episode in reversed(episodes))

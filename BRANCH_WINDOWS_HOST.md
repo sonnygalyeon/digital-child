@@ -1,14 +1,19 @@
-# Branch: windows-llm-host
+# Windows host branch
 
-This archive is based on Digital Child v0.3.0 and adds a dedicated Windows LLM host.
-
-Create the branch after replacing files:
+Версия v0.4.0 объединяет клиент и Windows-host в одном архиве. Для Git по-прежнему
+можно держать отдельную ветку:
 
 ```bash
-git checkout -b windows-llm-host
-git add .
-git commit -m "feat: add authenticated Windows LLM host with optional PostgreSQL"
+git checkout -b windows-llm-host-v0.4
 ```
 
-The Windows host is isolated under `windows_host/`; the existing Mac client remains usable.
-See `docs/WINDOWS_LLM_HOST.md`.
+Главные изменения хоста:
+
+- `digital-child-fast` на основе Qwen3 4B Instruct;
+- контекст 4096;
+- reasoning `none`;
+- прогрев модели;
+- ограничение output tokens;
+- измерение времени до первого токена;
+- исправлен безопасный PostgreSQL-аудит;
+- добавлен benchmark PowerShell.

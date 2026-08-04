@@ -8,6 +8,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from digital_child import __version__
 from digital_child.agent import DigitalChildAgent
 from digital_child.developmental_age import psychological_age_equivalent
 from digital_child.models import (
@@ -60,8 +61,8 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
 
     application = FastAPI(
         title="Digital Child API",
-        version="0.3.0",
-        description="Full LLM integration, streaming cognition, autonomy, memory and epistemic verification.",
+        version=__version__,
+        description="Fast Unicode chat, background verification, autonomous memory and desktop face integration.",
         lifespan=lifespan,
     )
 
@@ -82,7 +83,7 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
 
     @application.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "version": "0.3.0"}
+        return {"status": "ok", "version": __version__}
 
     @application.get("/v1/state", response_model=StateResponse)
     def get_state(request: Request) -> StateResponse:

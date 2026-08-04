@@ -18,6 +18,9 @@ class HostStatus(BaseModel):
     allowed_models: list[str]
     logical_cpu_count: int | None
     total_memory_gib: float | None
+    reasoning_effort: str = "none"
+    max_output_tokens: int = 768
+    warmup_on_start: bool = True
 
 
 class AuditRecord(BaseModel):
@@ -28,6 +31,7 @@ class AuditRecord(BaseModel):
     streamed: bool
     status_code: int
     duration_ms: int
+    first_token_ms: int | None = None
     request_bytes: int
     response_bytes: int
     content_sha256: str

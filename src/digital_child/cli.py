@@ -15,9 +15,10 @@ from digital_child.models import (
     Observation,
     SourceKind,
 )
+from digital_child.console import configure_utf8_console
+from digital_child.face_controller import FaceWindowController
 from digital_child.service import create_agent
-from digital_child.terminal_face import TerminalFaceRenderer
-from digital_child.terminal_ui import TerminalFaceApp
+from digital_child.terminal_chat import TerminalChatApp
 
 
 
@@ -310,14 +311,12 @@ def _opening_lines(agent) -> list[str]:
     ]
 
 
-def run_simple_chat(database_path: Path, auto_research: bool) -> None:
+def run_plain_chat(database_path: Path, auto_research: bool) -> None:
     agent = create_agent(database_path, auto_research=auto_research)
     router = ChatCommandRouter(agent)
-    renderer = TerminalFaceRenderer()
     try:
         for line in _opening_lines(agent):
             print(line)
-        print("\n".join(renderer.render(agent.emotion, 5).lines))
         while True:
             try:
                 text = input("\nВы> ").strip()
@@ -333,43 +332,68 @@ def run_simple_chat(database_path: Path, auto_research: bool) -> None:
         agent.repository.close()
 
 
-def run_face_chat(
+def run_desktop_chat(
     database_path: Path,
     *,
-    ascii_only: bool,
     auto_research: bool,
+    face_window: bool,
 ) -> None:
     agent = create_agent(database_path, auto_research=auto_research)
     router = ChatCommandRouter(agent)
-    app = TerminalFaceApp(
+    face = FaceWindowController(title=f"{agent.identity.display_name} — Digital Child") if face_window else None
+    if face is not None and not face.start():
+        print(
+            "[лицо] PySide6 не установлен. Выполни: "
+            "uv sync --extra dev --extra desktop"
+        )
+        face = None
+    app = TerminalChatApp(
         handler=router.handle,
         stream_handler=router.handle_stream,
         emotion_getter=lambda: agent.emotion,
         opening_lines=_opening_lines(agent),
-        ascii_only=ascii_only,
+        face=face,
     )
+    agent.set_background_notifier(app.notify)
     try:
         app.run()
     finally:
+        if face is not None:
+            face.close()
         agent.repository.close()
 
 
 def main() -> None:
+    configure_utf8_console()
     parser = argparse.ArgumentParser(
         prog="digital-child",
-        description="Digital Child v0.3.0: full streaming LLM and persistent cognitive context.",
+        description=(
+            "Digital Child v0.4.0: faster LLM profile, Unicode terminal input "
+            "and a separate animated human-like face window."
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    chat_parser = subparsers.add_parser("chat", help="Запустить терминальное общение")
+    chat_parser = subparsers.add_parser("chat", help="Запустить общение")
     chat_parser.add_argument("--db", type=Path, default=Path("data/digital_child.db"))
-    chat_parser.add_argument("--no-face", action="store_true", help="Обычный строковый режим")
-    chat_parser.add_argument("--ascii", action="store_true", help="ASCII вместо Unicode")
+    chat_parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="Обычный input()/print() без Prompt Toolkit",
+    )
+    chat_parser.add_argument(
+        "--no-face-window",
+        action="store_true",
+        help="Не запускать отдельное графическое окно лица",
+    )
     chat_parser.add_argument(
         "--no-auto-research",
         action="store_true",
         help="Не запускать поиск автоматически для фактических утверждений",
     )
+
+    face_parser = subparsers.add_parser("face", help="Проверить отдельное окно лица")
+    face_parser.add_argument("--seconds", type=float, default=0.0)
 
     llm_parser = subparsers.add_parser("llm", help="Проверить подключение LLM")
     llm_parser.add_argument("--db", type=Path, default=Path("data/digital_child.db"))
@@ -381,15 +405,33 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "chat":
         auto_research = not args.no_auto_research
-        use_face = not args.no_face and sys.stdin.isatty() and sys.stdout.isatty()
-        if use_face:
-            run_face_chat(
-                args.db,
-                ascii_only=args.ascii,
-                auto_research=auto_research,
-            )
+        if args.plain or not (sys.stdin.isatty() and sys.stdout.isatty()):
+            run_plain_chat(args.db, auto_research=auto_research)
         else:
-            run_simple_chat(args.db, auto_research=auto_research)
+            run_desktop_chat(
+                args.db,
+                auto_research=auto_research,
+                face_window=not args.no_face_window,
+            )
+        return
+    if args.command == "face":
+        import time
+
+        controller = FaceWindowController()
+        if not controller.start():
+            parser.error(
+                "PySide6 не установлен. Выполни: uv sync --extra dev --extra desktop"
+            )
+        try:
+            if args.seconds > 0:
+                time.sleep(args.seconds)
+            else:
+                while controller.running:
+                    time.sleep(0.2)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            controller.close()
         return
     if args.command == "llm":
         agent = create_agent(args.db)

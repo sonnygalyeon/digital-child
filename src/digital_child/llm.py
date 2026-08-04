@@ -121,8 +121,10 @@ class OpenAICompatibleBackend:
         model: str,
         api_key: str | None = None,
         timeout: float = 180.0,
-        temperature: float = 0.55,
-        max_tokens: int = 1200,
+        temperature: float = 0.45,
+        max_tokens: int = 512,
+        top_p: float = 0.9,
+        reasoning_effort: str = "none",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -130,6 +132,8 @@ class OpenAICompatibleBackend:
         self.timeout = timeout
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.top_p = top_p
+        self.reasoning_effort = reasoning_effort
 
     def generate_reply(self, context: ReplyContext) -> str:
         return "".join(self.stream_reply(context)).strip()
@@ -140,8 +144,11 @@ class OpenAICompatibleBackend:
             "model": self.model,
             "messages": messages,
             "temperature": self.temperature,
+            "top_p": self.top_p,
             "max_tokens": self.max_tokens,
+            "reasoning_effort": self.reasoning_effort,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         yielded = False
         for chunk in self._stream_chat(request_body):
@@ -192,7 +199,8 @@ class OpenAICompatibleBackend:
                 "model": self.model,
                 "messages": messages,
                 "temperature": 0.0,
-                "max_tokens": 1000,
+                "max_tokens": 450,
+                "reasoning_effort": "none",
                 "stream": False,
                 "response_format": {"type": "json_object"},
             }
@@ -327,7 +335,7 @@ def build_cognitive_backend() -> CognitiveBackend:
 
     if provider == "ollama":
         base_url = base_url or "http://127.0.0.1:11434/v1"
-        model = model or "qwen3.5:9b"
+        model = model or "qwen3:4b-instruct"
     elif provider in {"llamacpp", "llama.cpp"}:
         base_url = base_url or "http://127.0.0.1:8080/v1"
     elif provider in {"disabled", "none", "rule-based"}:
@@ -339,7 +347,11 @@ def build_cognitive_backend() -> CognitiveBackend:
             model=model,
             api_key=os.environ.get("DIGITAL_CHILD_LLM_API_KEY"),
             timeout=env_float("DIGITAL_CHILD_LLM_TIMEOUT", 180.0),
-            temperature=env_float("DIGITAL_CHILD_LLM_TEMPERATURE", 0.55),
-            max_tokens=env_int("DIGITAL_CHILD_LLM_MAX_TOKENS", 1200),
+            temperature=env_float("DIGITAL_CHILD_LLM_TEMPERATURE", 0.45),
+            max_tokens=env_int("DIGITAL_CHILD_LLM_MAX_TOKENS", 512),
+            top_p=env_float("DIGITAL_CHILD_LLM_TOP_P", 0.9),
+            reasoning_effort=os.environ.get(
+                "DIGITAL_CHILD_LLM_REASONING_EFFORT", "none"
+            ).strip().lower(),
         )
     return RuleBasedBackend()
