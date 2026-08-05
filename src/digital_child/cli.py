@@ -301,14 +301,28 @@ class ChatCommandRouter:
 
 def _opening_lines(agent) -> list[str]:
     if agent.genesis_event is None:
-        return ["Личность восстановлена из долговременной памяти. /help — команды."]
-    return [
-        "=== ПЕРВОЕ ПРОБУЖДЕНИЕ ===",
-        *agent.genesis_event.monologue,
-        "Вопросы, которые я сохраняю:",
-        *[f"• {question}" for question in agent.genesis_event.questions],
-        "Введите /help для списка команд.",
-    ]
+        lines = ["Личность восстановлена из долговременной памяти. /help — команды."]
+    else:
+        lines = [
+            "=== ПЕРВОЕ ПРОБУЖДЕНИЕ ===",
+            *agent.genesis_event.monologue,
+            "Вопросы, которые я сохраняю:",
+            *[f"• {question}" for question in agent.genesis_event.questions],
+            "Введите /help для списка команд.",
+        ]
+
+    health = agent.llm_health()
+    if not health.enabled:
+        lines.append(
+            "⚠ Полноценная LLM не настроена: используется rule-based fallback. "
+            "Проверь .env командой /llm."
+        )
+    elif not health.healthy:
+        lines.append(
+            f"⚠ LLM настроена, но endpoint недоступен: {health.detail} "
+            "Проверь Windows-host и команду /llm."
+        )
+    return lines
 
 
 def run_plain_chat(database_path: Path, auto_research: bool) -> None:
@@ -368,7 +382,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="digital-child",
         description=(
-            "Digital Child v0.4.0: faster LLM profile, Unicode terminal input "
+            "Digital Child v0.4.1: faster LLM profile, Unicode terminal input "
             "and a separate animated human-like face window."
         ),
     )

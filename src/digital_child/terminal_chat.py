@@ -102,7 +102,6 @@ class TerminalChatApp:
                 if text == "/quit":
                     break
                 self._set_face("thinking", override=EmotionName.THINKING, status="РАЗМЫШЛЯЮ")
-                self._print_user_echo(text)
                 self._first_token = True
                 spinner = threading.Thread(target=self._spinner, daemon=True)
                 self._spinner_stop.clear()
@@ -183,7 +182,7 @@ class TerminalChatApp:
         print_formatted_text(
             HTML(
                 "<title>╭" + "─" * width + "╮</title>\n"
-                "<title>│</title>  DIGITAL CHILD  <status>v0.4.0</status>"
+                "<title>│</title>  DIGITAL CHILD  <status>v0.4.1</status>"
                 + " " * 27
                 + "<title>│</title>\n"
                 "<title>│</title>  <status>" + backend + "</status>"

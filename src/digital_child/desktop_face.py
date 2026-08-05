@@ -331,14 +331,14 @@ def run_face_window(connection: Connection, *, title: str, fps: int = 60) -> Non
             painter.setBrush(QColor(4, 13, 19, 205))
             rect = QRectF(22, self.height() - 78, self.width() - 44, 50)
             painter.drawRoundedRect(rect, 14, 14)
-            painter.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+            painter.setFont(QFont("Sans Serif", 10, QFont.Weight.DemiBold))
             painter.setPen(QColor(220, 245, 246))
             painter.drawText(
                 rect.adjusted(16, 5, -16, -23),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 self.state.status_text,
             )
-            painter.setFont(QFont("Segoe UI", 8))
+            painter.setFont(QFont("Sans Serif", 8))
             painter.setPen(QColor(125, 182, 188))
             details = (
                 f"эмоция: {self.state.expression}   "

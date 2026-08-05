@@ -296,11 +296,20 @@ class DigitalChildAgent:
             if on_token is not None and self.cognitive_backend.supports_streaming:
                 chunks: list[str] = []
                 for token in self.cognitive_backend.stream_reply(context):
+                    if not token:
+                        continue
                     chunks.append(token)
                     on_token(token)
                 response = "".join(chunks).strip()
+                if not response:
+                    response = RuleBasedBackend().generate_reply(context)
+                    on_token(response)
             else:
-                response = self.cognitive_backend.generate_reply(context)
+                response = self.cognitive_backend.generate_reply(context).strip()
+                if not response:
+                    response = RuleBasedBackend().generate_reply(context)
+                if on_token is not None:
+                    on_token(response)
         except RuntimeError as exc:
             response = RuleBasedBackend().generate_reply(context)
             response += f" [Когнитивный backend недоступен: {exc}]"

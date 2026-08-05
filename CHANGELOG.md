@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0
+## 0.4.1
 
 - Replaced curses input with Prompt Toolkit and UTF-8 console setup.
 - Added Russian keyboard input support on macOS, Linux and Windows terminals.
