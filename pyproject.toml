@@ -1,7 +1,7 @@
 [project]
 name = "digital-child"
-version = "0.4.1"
-description = "Fast Unicode terminal chat with background verification and a separate animated human-like desktop face."
+version = "0.5.0"
+description = "Event-driven needs, self-generated goals and a bounded autonomous cognitive loop for a long-lived digital agent."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [

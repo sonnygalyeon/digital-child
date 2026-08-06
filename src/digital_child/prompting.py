@@ -36,6 +36,8 @@ def build_reply_messages(context: ReplyContext) -> list[dict[str, str]]:
 имя={context.identity.display_name}; стадия={context.development_stage}; DEU={context.total_deu:.2f}
 самоописание={_clip(context.identity.self_description, 420)}
 цели={goals}
+выбранная_цель={_clip(context.active_goal_summary, 420)}
+потребности={_clip(context.needs_summary, 520)}
 
 СОБЕСЕДНИК
 доверие_к_фактам={context.relationship.epistemic_trust:.2f}; эмоциональное_доверие={context.relationship.affective_trust:.2f}; риск_обмана={context.relationship.deception_risk:.2f}

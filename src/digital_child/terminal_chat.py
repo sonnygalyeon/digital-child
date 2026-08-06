@@ -20,10 +20,19 @@ from digital_child.models import EmotionName, EmotionState
 _COMMANDS = [
     "/help",
     "/state",
+    "/diagnostics",
     "/llm",
     "/history",
     "/identity",
     "/goals",
+    "/needs",
+    "/drives",
+    "/background",
+    "/budgets",
+    "/events",
+    "/pause",
+    "/resume",
+    "/tick",
     "/trust",
     "/beliefs",
     "/research",
@@ -177,12 +186,12 @@ class TerminalChatApp:
         )
 
     def _print_header(self) -> None:
-        backend = "LLM + автономия + долговременная память"
+        backend = "LLM + память + потребности + автономный цикл"
         width = 64
         print_formatted_text(
             HTML(
                 "<title>╭" + "─" * width + "╮</title>\n"
-                "<title>│</title>  DIGITAL CHILD  <status>v0.4.1</status>"
+                "<title>│</title>  DIGITAL CHILD  <status>v0.5.0</status>"
                 + " " * 27
                 + "<title>│</title>\n"
                 "<title>│</title>  <status>" + backend + "</status>"

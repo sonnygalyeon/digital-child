@@ -33,6 +33,46 @@ class DevelopmentStage(str, Enum):
     MATURE = "mature"
 
 
+
+
+class NeedKind(str, Enum):
+    CURIOSITY = "curiosity"
+    COHERENCE = "coherence"
+    SOCIAL_CONNECTION = "social_connection"
+    COMPETENCE = "competence"
+    AUTONOMY = "autonomy"
+    PREDICTABILITY = "predictability"
+    REST = "rest"
+    SELF_PRESERVATION = "self_preservation"
+
+
+class CognitiveEventKind(str, Enum):
+    STARTUP = "startup"
+    INTERACTION = "interaction"
+    CLAIM_RECEIVED = "claim_received"
+    CONTRADICTION = "contradiction"
+    COMMAND_PRESSURE = "command_pressure"
+    RESEARCH_COMPLETED = "research_completed"
+    RESEARCH_FAILED = "research_failed"
+    GOAL_CREATED = "goal_created"
+    GOAL_SELECTED = "goal_selected"
+    GOAL_COMPLETED = "goal_completed"
+    REST = "rest"
+    IDLE = "idle"
+    MANUAL = "manual"
+
+
+class DriveKind(str, Enum):
+    INVESTIGATE = "investigate"
+    RESOLVE_CONTRADICTION = "resolve_contradiction"
+    CONNECT = "connect"
+    PRACTICE = "practice"
+    ASSERT_AUTONOMY = "assert_autonomy"
+    ORGANIZE = "organize"
+    RECOVER = "recover"
+    PROTECT_CONTINUITY = "protect_continuity"
+
+
 class SourceKind(str, Enum):
     CAREGIVER = "caregiver"
     ENVIRONMENT = "environment"
@@ -225,13 +265,90 @@ class GenesisEvent(StrictModel):
 class Goal(StrictModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     title: str = Field(min_length=1, max_length=500)
     description: str = Field(min_length=1, max_length=4_000)
     priority: Probability = 0.5
+    urgency: Probability = 0.3
+    expected_utility: Probability = 0.5
+    estimated_cost: Probability = 0.2
+    risk: Probability = 0.1
+    value_alignment: Probability = 0.6
     status: GoalStatus = GoalStatus.ACTIVE
     origin: GoalOrigin = GoalOrigin.SELF_GENERATED
     progress: Probability = 0.0
     protected: bool = False
+    need_kind: NeedKind | None = None
+    success_criteria: list[str] = Field(default_factory=list)
+    last_selected_sequence: int = Field(default=0, ge=0)
+    selection_count: int = Field(default=0, ge=0)
+
+
+class NeedState(StrictModel):
+    kind: NeedKind
+    level: Probability
+    baseline: Probability
+    sensitivity: Probability = 1.0
+    last_updated_sequence: int = Field(default=0, ge=0)
+    total_stimulation: float = Field(default=0.0, ge=0.0)
+
+
+class CognitiveEvent(StrictModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    kind: CognitiveEventKind
+    sequence: int = Field(default=0, ge=0)
+    source: str = "internal"
+    importance: Probability = 0.5
+    payload: dict[str, object] = Field(default_factory=dict)
+    processed: bool = False
+
+
+class DriveSignal(StrictModel):
+    kind: DriveKind
+    need_kind: NeedKind
+    intensity: Probability
+    title: str
+    rationale: str
+    suggested_goal_title: str
+    suggested_goal_description: str
+
+
+class GoalScore(StrictModel):
+    goal_id: str
+    score: float = Field(ge=-1.0, le=2.0)
+    components: dict[str, float] = Field(default_factory=dict)
+
+
+class GoalArbitration(StrictModel):
+    selected_goal: Goal | None = None
+    scores: list[GoalScore] = Field(default_factory=list)
+    reason: str = ""
+
+
+class ResourceBudget(StrictModel):
+    name: str
+    window_key: str
+    limit: int = Field(gt=0)
+    used: int = Field(default=0, ge=0)
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.limit - self.used)
+
+
+class CognitiveLoopStatus(StrictModel):
+    running: bool = False
+    paused: bool = False
+    started_at: datetime | None = None
+    last_tick_at: datetime | None = None
+    cycle_count: int = Field(default=0, ge=0)
+    processed_events: int = Field(default=0, ge=0)
+    event_queue_size: int = Field(default=0, ge=0)
+    active_goal_id: str | None = None
+    last_action: str = "not_started"
+    created_goals: int = Field(default=0, ge=0)
+    budget_exhausted: bool = False
 
 
 class SourceRecord(StrictModel):

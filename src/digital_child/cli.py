@@ -52,10 +52,19 @@ def build_caregiver_observation(
 HELP_TEXT = """Команды:
   /help                         показать справку
   /state                        развитие, состояние и психологический возраст
+  /diagnostics                  сводная диагностика всех подсистем
   /llm                          состояние подключения полноценной LLM
   /history [N]                  сохранённая история диалога
   /identity                     самомодель и вопросы первого пробуждения
-  /goals [N]                    собственные активные цели
+  /goals [N]                    активные и предложенные цели
+  /needs                        текущие внутренние потребности
+  /drives                       активные внутренние импульсы
+  /background                   состояние когнитивного цикла
+  /budgets                      операционные бюджеты автономии
+  /events [N]                   последние внутренние события
+  /pause                        приостановить внутренний цикл
+  /resume                       возобновить внутренний цикл
+  /tick                         выполнить один безопасный цикл вручную
   /trust                        отношение к локальному собеседнику
   /beliefs [N]                  убеждения с уверенностью и противоречиями
   /research <утверждение>       принудительно проверить утверждение в интернете
@@ -101,8 +110,12 @@ class ChatCommandRouter:
                 "emotion": self.agent.emotion.model_dump(mode="json"),
                 "backend": self.agent.cognitive_backend.name,
                 "research_provider": self.agent.research_engine.provider.name,
+                "cognitive_loop": self.agent.cognitive_loop.status.model_dump(mode="json"),
+                "active_goal": self.agent._active_goal_summary(),
             }
             return json.dumps(payload, ensure_ascii=False, indent=2)
+        if text == "/diagnostics":
+            return json.dumps(self.agent.diagnostics(), ensure_ascii=False, indent=2)
         if text == "/llm":
             return self.agent.llm_health().model_dump_json(indent=2)
         if text.startswith("/history"):
@@ -125,10 +138,55 @@ class ChatCommandRouter:
             if not goals:
                 return "Целей пока нет."
             return "\n".join(
-                f"- [{goal.status.value}] p={goal.priority:.2f} progress={goal.progress:.2f} | "
+                f"- [{goal.status.value}/{goal.origin.value}] p={goal.priority:.2f} "
+                f"urgency={goal.urgency:.2f} progress={goal.progress:.2f} "
+                f"selected={goal.selection_count} need="
+                f"{None if goal.need_kind is None else goal.need_kind.value} | "
                 f"{goal.title}: {goal.description}"
                 for goal in goals
             )
+        if text == "/needs":
+            needs = self.agent.cognitive_loop.needs()
+            return "\n".join(
+                f"- {item.kind.value}: {item.level:.3f} "
+                f"(baseline={item.baseline:.2f}, stimulation={item.total_stimulation:.3f})"
+                for item in needs
+            )
+        if text == "/drives":
+            drives = self.agent.cognitive_loop.drives()
+            if not drives:
+                return "Сильных внутренних импульсов сейчас нет."
+            return "\n".join(
+                f"- [{item.kind.value}] intensity={item.intensity:.3f} "
+                f"need={item.need_kind.value} | {item.title}: {item.rationale}"
+                for item in drives
+            )
+        if text == "/background":
+            return self.agent.cognitive_loop.status.model_dump_json(indent=2)
+        if text == "/budgets":
+            return "\n".join(
+                f"- {item.name}: used={item.used}/{item.limit}, remaining={item.remaining}, "
+                f"window={item.window_key}"
+                for item in self.agent.cognitive_loop.budgets.list()
+            )
+        if text.startswith("/events"):
+            limit = _parse_limit(text, 20)
+            if limit is None:
+                return "Количество должно быть целым числом."
+            events = self.agent.repository.recent_cognitive_events(limit)
+            if not events:
+                return "Внутренних событий пока нет."
+            return "\n".join(
+                f"- #{event.sequence} [{event.kind.value}] processed={event.processed} "
+                f"source={event.source} importance={event.importance:.2f}"
+                for event in events
+            )
+        if text == "/pause":
+            return self.agent.pause_cognitive_loop().model_dump_json(indent=2)
+        if text == "/resume":
+            return self.agent.resume_cognitive_loop().model_dump_json(indent=2)
+        if text == "/tick":
+            return self.agent.cognitive_tick().model_dump_json(indent=2)
         if text == "/trust":
             relationship = self.agent.trust_engine.get_or_create(self.person_id)
             return relationship.model_dump_json(indent=2)
@@ -325,9 +383,11 @@ def _opening_lines(agent) -> list[str]:
     return lines
 
 
-def run_plain_chat(database_path: Path, auto_research: bool) -> None:
+def run_plain_chat(database_path: Path, auto_research: bool, cognitive_loop: bool = True) -> None:
     agent = create_agent(database_path, auto_research=auto_research)
     router = ChatCommandRouter(agent)
+    if cognitive_loop:
+        agent.start_cognitive_loop()
     try:
         for line in _opening_lines(agent):
             print(line)
@@ -343,7 +403,7 @@ def run_plain_chat(database_path: Path, auto_research: bool) -> None:
                 break
             print(f"Агент> {router.handle(text)}")
     finally:
-        agent.repository.close()
+        agent.close()
 
 
 def run_desktop_chat(
@@ -351,6 +411,7 @@ def run_desktop_chat(
     *,
     auto_research: bool,
     face_window: bool,
+    cognitive_loop: bool = True,
 ) -> None:
     agent = create_agent(database_path, auto_research=auto_research)
     router = ChatCommandRouter(agent)
@@ -369,12 +430,14 @@ def run_desktop_chat(
         face=face,
     )
     agent.set_background_notifier(app.notify)
+    if cognitive_loop:
+        agent.start_cognitive_loop()
     try:
         app.run()
     finally:
         if face is not None:
             face.close()
-        agent.repository.close()
+        agent.close()
 
 
 def main() -> None:
@@ -382,8 +445,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="digital-child",
         description=(
-            "Digital Child v0.4.1: faster LLM profile, Unicode terminal input "
-            "and a separate animated human-like face window."
+            "Digital Child v0.5.0: event-driven needs, self-generated goals, "
+            "goal arbitration and a bounded autonomous cognitive loop."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -405,6 +468,11 @@ def main() -> None:
         action="store_true",
         help="Не запускать поиск автоматически для фактических утверждений",
     )
+    chat_parser.add_argument(
+        "--no-cognitive-loop",
+        action="store_true",
+        help="Не запускать автономный фоновый когнитивный цикл",
+    )
 
     face_parser = subparsers.add_parser("face", help="Проверить отдельное окно лица")
     face_parser.add_argument("--seconds", type=float, default=0.0)
@@ -420,12 +488,17 @@ def main() -> None:
     if args.command == "chat":
         auto_research = not args.no_auto_research
         if args.plain or not (sys.stdin.isatty() and sys.stdout.isatty()):
-            run_plain_chat(args.db, auto_research=auto_research)
+            run_plain_chat(
+                args.db,
+                auto_research=auto_research,
+                cognitive_loop=not args.no_cognitive_loop,
+            )
         else:
             run_desktop_chat(
                 args.db,
                 auto_research=auto_research,
                 face_window=not args.no_face_window,
+                cognitive_loop=not args.no_cognitive_loop,
             )
         return
     if args.command == "face":
@@ -452,7 +525,7 @@ def main() -> None:
         try:
             print(agent.llm_health().model_dump_json(indent=2))
         finally:
-            agent.repository.close()
+            agent.close()
         return
     if args.command == "serve":
         uvicorn.run("digital_child.api:app", host=args.host, port=args.port, reload=False)

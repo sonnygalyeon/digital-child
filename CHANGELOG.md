@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0
+
+- Added event-driven need states independent of wall-clock age.
+- Added persistent cognitive events and crash recovery of unprocessed events.
+- Added deterministic internal drives and self-generated goal candidates.
+- Added user-suggested goals that do not imply authority.
+- Added goal arbitration by need pressure, urgency, value alignment, utility, cost and risk.
+- Added bounded background cognitive loop with pause, resume and manual tick.
+- Added persistent resource budgets and diagnostics.
+- Added CLI and HTTP endpoints for needs, drives, events, budgets and loop state.
+- Preserved v0.4.1 LLM, Russian terminal input, memory and desktop face behavior.
+- Added automatic SQLite migration and 44 passing tests.
+
 ## 0.4.1
 
 - Replaced curses input with Prompt Toolkit and UTF-8 console setup.

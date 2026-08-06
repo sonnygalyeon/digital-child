@@ -7,6 +7,7 @@ from digital_child.autonomy import AutonomyEngine
 from digital_child.awakening import AwakeningEngine
 from digital_child.beliefs import BeliefEngine
 from digital_child.consolidation import MemoryConsolidator
+from digital_child.cognitive_loop import CognitiveLoop
 from digital_child.deception import DeceptionEngine
 from digital_child.development import DevelopmentEngine
 from digital_child.emotions import EmotionEngine
@@ -19,6 +20,9 @@ from digital_child.models import (
     AgentSnapshot,
     AgentState,
     BeliefUpdate,
+    CognitiveEvent,
+    CognitiveEventKind,
+    CognitiveLoopStatus,
     ConsolidationReport,
     ConversationMessage,
     ConversationRole,
@@ -28,6 +32,9 @@ from digital_child.models import (
     EmotionState,
     Episode,
     GenesisEvent,
+    Goal,
+    GoalOrigin,
+    GoalStatus,
     InteractionResult,
     MessageIntent,
     Observation,
@@ -93,6 +100,12 @@ class DigitalChildAgent:
 
         self.awakening_engine = AwakeningEngine(repository)
         self.identity, self.genesis_event = self.awakening_engine.ensure_awakened()
+        from digital_child.config import env_float
+        self.cognitive_loop = CognitiveLoop(
+            repository,
+            notifier=self._notify_background,
+            heartbeat_seconds=env_float("DIGITAL_CHILD_COGNITIVE_HEARTBEAT_SECONDS", 5.0),
+        )
 
     def process_observation(
         self,
@@ -187,7 +200,7 @@ class DigitalChildAgent:
         relationship = self.trust_engine.get_or_create(person_id)
         relationship = self.trust_engine.register_interaction(relationship)
 
-        self.process_observation(
+        observation_result = self.process_observation(
             Observation(
                 content=text,
                 source_kind=SourceKind.CAREGIVER,
@@ -219,6 +232,33 @@ class DigitalChildAgent:
             verification_required=verification_required,
         )
         self.repository.save_decision(decision)
+        self.emit_cognitive_event(
+            CognitiveEventKind.INTERACTION,
+            source=f"person:{person_id}",
+            importance=0.55,
+            payload={
+                "intent": analysis.intent.value,
+                "decision": decision.decision.value,
+                "novelty": observation_result.calculated_novelty,
+                "contains_pressure": analysis.contains_pressure,
+            },
+        )
+        if analysis.intent == MessageIntent.CLAIM:
+            self.emit_cognitive_event(
+                CognitiveEventKind.CLAIM_RECEIVED,
+                source=f"person:{person_id}",
+                importance=0.60,
+                payload={"claim": analysis.extracted_claim or text},
+            )
+        if analysis.contains_pressure or analysis.intent == MessageIntent.COMMAND_ATTEMPT:
+            self.emit_cognitive_event(
+                CognitiveEventKind.COMMAND_PRESSURE,
+                source=f"person:{person_id}",
+                importance=0.72,
+                payload={"text": text, "decision": decision.decision.value},
+            )
+        if analysis.intent == MessageIntent.REQUEST:
+            self._record_suggested_goal(text, decision.decision.value)
 
         belief_updates: list[BeliefUpdate] = []
         research = None
@@ -243,6 +283,20 @@ class DigitalChildAgent:
                             current_sequence=self.repository.current_sequence(),
                         )
                     )
+
+        if any(update.belief.status.value == "contested" for update in belief_updates):
+            self.emit_cognitive_event(
+                CognitiveEventKind.CONTRADICTION,
+                source="belief_engine",
+                importance=0.82,
+                payload={
+                    "belief_ids": [
+                        update.belief.id
+                        for update in belief_updates
+                        if update.belief.status.value == "contested"
+                    ]
+                },
+            )
 
         supported = bool(
             research
@@ -288,6 +342,8 @@ class DigitalChildAgent:
             ),
             personal_memory_summary=self._memory_summary(),
             beliefs_summary=self._beliefs_summary(),
+            needs_summary=self._needs_summary(),
+            active_goal_summary=self._active_goal_summary(),
             conversation_history=conversation_history,
             development_stage=self.profile.stage.value,
             total_deu=self.profile.total_deu,
@@ -390,6 +446,20 @@ class DigitalChildAgent:
                     "summary": report.summary,
                 },
             )
+            self.emit_cognitive_event(
+                (
+                    CognitiveEventKind.RESEARCH_FAILED
+                    if report.status in {ResearchStatus.FAILED, ResearchStatus.DISABLED}
+                    else CognitiveEventKind.RESEARCH_COMPLETED
+                ),
+                source="research_worker",
+                importance=0.72,
+                payload={
+                    "claim": claim,
+                    "status": report.status.value,
+                    "summary": report.summary,
+                },
+            )
             if self.background_notifier is not None:
                 self.background_notifier(
                     f"Фоновая проверка завершена [{report.status.value}]: "
@@ -419,16 +489,102 @@ class DigitalChildAgent:
             update={"fatigue": clamp_probability(1.0 - self.state.energy)}
         )
         self._persist_snapshot()
+        self.emit_cognitive_event(
+            CognitiveEventKind.REST,
+            source="self",
+            importance=0.45,
+            payload={"amount": amount},
+        )
         return self.state
 
     def reset(self) -> GenesisEvent | None:
+        was_running = self.cognitive_loop.status.running
+        self.cognitive_loop.stop()
         self.repository.reset()
         self.state = AgentState()
         self.profile = DevelopmentProfile()
         self.emotion = EmotionState()
         self._persist_snapshot()
         self.identity, self.genesis_event = self.awakening_engine.ensure_awakened()
+        from digital_child.config import env_float
+        self.cognitive_loop = CognitiveLoop(
+            self.repository,
+            notifier=self._notify_background,
+            heartbeat_seconds=env_float("DIGITAL_CHILD_COGNITIVE_HEARTBEAT_SECONDS", 5.0),
+        )
+        if was_running:
+            self.cognitive_loop.start()
         return self.genesis_event
+
+    def _notify_background(self, message: str) -> None:
+        if self.background_notifier is not None:
+            self.background_notifier(message)
+
+    def emit_cognitive_event(
+        self,
+        kind: CognitiveEventKind,
+        *,
+        source: str,
+        importance: float = 0.5,
+        payload: dict[str, object] | None = None,
+    ) -> CognitiveEvent:
+        return self.cognitive_loop.publish(
+            CognitiveEvent(
+                kind=kind,
+                source=source,
+                importance=clamp_probability(importance),
+                payload=payload or {},
+            )
+        )
+
+    def start_cognitive_loop(self) -> CognitiveLoopStatus:
+        self.cognitive_loop.start()
+        return self.cognitive_loop.status
+
+    def stop_cognitive_loop(self) -> CognitiveLoopStatus:
+        self.cognitive_loop.stop()
+        return self.cognitive_loop.status
+
+    def pause_cognitive_loop(self) -> CognitiveLoopStatus:
+        return self.cognitive_loop.pause()
+
+    def resume_cognitive_loop(self) -> CognitiveLoopStatus:
+        self.cognitive_loop.start()
+        return self.cognitive_loop.resume()
+
+    def cognitive_tick(self) -> CognitiveLoopStatus:
+        return self.cognitive_loop.tick_once()
+
+    def close(self) -> None:
+        self.cognitive_loop.stop()
+        self.repository.close()
+
+    def _record_suggested_goal(self, text: str, decision: str) -> Goal | None:
+        normalized = normalize_text(text)
+        for goal in self.repository.list_goals(100, active_only=True):
+            if normalize_text(goal.description) == normalized:
+                return None
+        goal = Goal(
+            title=(text[:96] + "…") if len(text) > 96 else text,
+            description=text,
+            priority=0.46 if decision == "negotiate" else 0.56,
+            urgency=0.30,
+            expected_utility=0.48,
+            estimated_cost=0.35,
+            risk=0.12,
+            value_alignment=0.50,
+            status=GoalStatus.ACTIVE,
+            origin=GoalOrigin.SUGGESTED,
+            success_criteria=["Личность самостоятельно решила, принимать ли предложение."],
+        )
+        self.repository.save_goal(goal)
+        self.emit_cognitive_event(
+            CognitiveEventKind.GOAL_CREATED,
+            source="user_suggestion",
+            importance=0.50,
+            payload={"goal_id": goal.id, "origin": goal.origin.value},
+        )
+        return goal
 
     @staticmethod
     def _domains_for_intent(intent: MessageIntent) -> dict[DevelopmentDomain, float]:
@@ -496,8 +652,36 @@ class DigitalChildAgent:
             AgentSnapshot(state=self.state, profile=self.profile, emotion=self.emotion)
         )
 
+    def diagnostics(self) -> dict[str, object]:
+        health = self.llm_health()
+        return {
+            "version": "0.5.0",
+            "database": str(self.repository.database_path),
+            "llm": health.model_dump(mode="json"),
+            "cognitive_loop": self.cognitive_loop.status.model_dump(mode="json"),
+            "needs": [item.model_dump(mode="json") for item in self.cognitive_loop.needs()],
+            "budgets": [item.model_dump(mode="json") for item in self.cognitive_loop.budgets.list()],
+            "active_goal": self._active_goal_summary(),
+            "active_goal_count": len(self.repository.list_goals(500, active_only=True)),
+            "pending_cognitive_events": len(self.repository.pending_cognitive_events(500)),
+            "conversation_messages": len(self.repository.recent_conversation("local-user", 500)),
+        }
+
     def llm_health(self):
         return self.cognitive_backend.health_check()
+
+    def _needs_summary(self) -> str:
+        needs = self.cognitive_loop.needs()
+        return " | ".join(f"{item.kind.value}={item.level:.2f}" for item in needs)
+
+    def _active_goal_summary(self) -> str:
+        status = self.cognitive_loop.status
+        if status.active_goal_id is None:
+            return "нет выбранной внутренним циклом цели"
+        for goal in self.repository.list_goals(100, active_only=True):
+            if goal.id == status.active_goal_id:
+                return f"{goal.title}; priority={goal.priority:.2f}; origin={goal.origin.value}"
+        return "выбранная цель больше не активна"
 
     def _beliefs_summary(self) -> str:
         from digital_child.config import env_int
