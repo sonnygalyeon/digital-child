@@ -23,8 +23,10 @@ Write-Host "`nCompletion:" -ForegroundColor Cyan
 $Body = @{
     model = $Model
     stream = $false
+    reasoning_effort = "none"
+    max_tokens = 64
     messages = @(
-        @{ role = "system"; content = "Answer briefly in Russian." },
+        @{ role = "system"; content = "Отвечай кратко на русском языке." },
         @{ role = "user"; content = "Ответь одним словом: сервер работает?" }
     )
 } | ConvertTo-Json -Depth 8

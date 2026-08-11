@@ -1,7 +1,9 @@
 param(
-    [string]$Model = "qwen3:8b",
+    [string]$BaseModel = "qwen3:4b-instruct",
+    [string]$ModelName = "digital-child-fast",
     [switch]$WithPostgres,
-    [switch]$OpenFirewall
+    [switch]$OpenFirewall,
+    [switch]$RegenerateApiKey
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,6 +12,13 @@ $HostDir = Join-Path $RepoRoot "windows_host"
 
 function Write-Step([string]$Text) {
     Write-Host "`n==> $Text" -ForegroundColor Cyan
+}
+
+function Get-EnvValue([string]$Path, [string]$Name) {
+    if (-not (Test-Path $Path)) { return $null }
+    $Line = Get-Content -Path $Path -Encoding UTF8 | Where-Object { $_ -like "$Name=*" } | Select-Object -First 1
+    if (-not $Line) { return $null }
+    return $Line.Split("=", 2)[1]
 }
 
 Write-Step "Checking uv"
@@ -43,11 +52,11 @@ try {
 
 Write-Step "Applying CPU-oriented Ollama settings"
 $OllamaSettings = @{
-    OLLAMA_CONTEXT_LENGTH = "8192"
+    OLLAMA_CONTEXT_LENGTH = "4096"
     OLLAMA_NUM_PARALLEL = "1"
     OLLAMA_MAX_LOADED_MODELS = "1"
     OLLAMA_MAX_QUEUE = "8"
-    OLLAMA_KEEP_ALIVE = "30m"
+    OLLAMA_KEEP_ALIVE = "60m"
 }
 foreach ($Entry in $OllamaSettings.GetEnumerator()) {
     [Environment]::SetEnvironmentVariable($Entry.Key, $Entry.Value, "User")
@@ -60,16 +69,32 @@ Start-Sleep -Seconds 1
 Start-Process -FilePath "ollama" -ArgumentList "serve" -WindowStyle Hidden
 Start-Sleep -Seconds 3
 
-Write-Step "Downloading model $Model"
-ollama pull $Model
+Write-Step "Downloading base model $BaseModel"
+ollama pull $BaseModel
+
+Write-Step "Creating optimized model $ModelName"
+$TemplatePath = Join-Path $HostDir "Modelfile.fast"
+$GeneratedPath = Join-Path $HostDir "Modelfile.generated"
+$Template = Get-Content -Path $TemplatePath -Raw
+$Template = $Template -replace "(?m)^FROM\s+.+$", "FROM $BaseModel"
+$Template | Set-Content -Path $GeneratedPath -Encoding UTF8
+try {
+    ollama create $ModelName -f $GeneratedPath
+} finally {
+    Remove-Item $GeneratedPath -ErrorAction SilentlyContinue
+}
 
 Write-Step "Creating gateway configuration"
-$ApiBytes = New-Object byte[] 48
-[System.Security.Cryptography.RandomNumberGenerator]::Fill($ApiBytes)
-$ApiKey = [Convert]::ToBase64String($ApiBytes).Replace("+", "-").Replace("/", "_").TrimEnd("=")
 $EnvPath = Join-Path $HostDir ".env"
-$AllowedModels = "$Model,qwen3:4b"
-$PostgresDsn = ""
+$ApiKey = if (-not $RegenerateApiKey) { Get-EnvValue $EnvPath "WINDOWS_HOST_API_KEY" } else { $null }
+if (-not $ApiKey) {
+    $ApiBytes = New-Object byte[] 48
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($ApiBytes)
+    $ApiKey = [Convert]::ToBase64String($ApiBytes).Replace("+", "-").Replace("/", "_").TrimEnd("=")
+}
+$AllowedModels = "$ModelName,$BaseModel,qwen3:8b"
+$PostgresDsn = Get-EnvValue $EnvPath "WINDOWS_HOST_POSTGRES_DSN"
+if ($null -eq $PostgresDsn) { $PostgresDsn = "" }
 
 if ($WithPostgres) {
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -95,10 +120,14 @@ WINDOWS_HOST_BIND=0.0.0.0
 WINDOWS_HOST_PORT=8787
 WINDOWS_HOST_API_KEY=$ApiKey
 WINDOWS_HOST_OLLAMA_BASE_URL=http://127.0.0.1:11434/v1
-WINDOWS_HOST_DEFAULT_MODEL=$Model
+WINDOWS_HOST_OLLAMA_NATIVE_URL=http://127.0.0.1:11434
+WINDOWS_HOST_DEFAULT_MODEL=$ModelName
 WINDOWS_HOST_ALLOWED_MODELS=$AllowedModels
-WINDOWS_HOST_REQUEST_TIMEOUT=300
-WINDOWS_HOST_MAX_REQUEST_BYTES=4194304
+WINDOWS_HOST_REQUEST_TIMEOUT=180
+WINDOWS_HOST_MAX_REQUEST_BYTES=2097152
+WINDOWS_HOST_MAX_OUTPUT_TOKENS=768
+WINDOWS_HOST_REASONING_EFFORT=none
+WINDOWS_HOST_WARMUP_ON_START=true
 WINDOWS_HOST_POSTGRES_DSN=$PostgresDsn
 WINDOWS_HOST_STORE_CONTENT=false
 WINDOWS_HOST_LOG_REQUESTS=true
@@ -121,7 +150,12 @@ if ($OpenFirewall) {
     }
 }
 
+Write-Step "Warming model once"
+ollama run $ModelName --think=false "Ответь одним словом: готов" | Out-Null
+
 Write-Step "Configuration complete"
+Write-Host "Optimized model: $ModelName (base: $BaseModel)" -ForegroundColor Green
 Write-Host "API key: $ApiKey" -ForegroundColor Yellow
-Write-Host "Save this key on the Mac client. It is also stored in windows_host\.env."
+Write-Host "Save this key on the client. It is also stored in windows_host\.env."
 Write-Host "Start host: .\scripts\windows\start_windows_host.ps1"
+Write-Host "Benchmark: .\scripts\windows\benchmark_windows_host.ps1"

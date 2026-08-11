@@ -7,8 +7,9 @@ import httpx
 
 
 class OllamaGateway:
-    def __init__(self, base_url: str, timeout: float) -> None:
+    def __init__(self, base_url: str, native_url: str, timeout: float) -> None:
         self.base_url = base_url.rstrip("/")
+        self.native_url = native_url.rstrip("/")
         self.timeout = timeout
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout, connect=10.0),
@@ -28,6 +29,25 @@ class OllamaGateway:
     async def models(self) -> tuple[int, Any]:
         response = await self.client.get(f"{self.base_url}/models")
         return response.status_code, response.json()
+
+    async def warmup(self, model: str) -> bool:
+        """Load the model without generating a visible answer."""
+        try:
+            response = await self.client.post(
+                f"{self.native_url}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": ""}],
+                    "stream": False,
+                    "think": False,
+                    "keep_alive": "60m",
+                    "options": {"num_predict": 1},
+                },
+                timeout=httpx.Timeout(self.timeout, connect=10.0),
+            )
+            return response.status_code == 200
+        except httpx.HTTPError:
+            return False
 
     async def chat(self, payload: dict[str, Any]) -> tuple[int, bytes, str]:
         response = await self.client.post(

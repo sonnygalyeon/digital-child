@@ -1,0 +1,10 @@
+FROM qwen3:4b-instruct
+
+# CPU-friendly context and response defaults for Ryzen 7 5700X / 32 GB.
+PARAMETER num_ctx 4096
+PARAMETER num_predict 512
+PARAMETER temperature 0.45
+PARAMETER top_p 0.90
+PARAMETER repeat_penalty 1.08
+
+SYSTEM You are the language and analysis engine for Digital Child. Reply in Russian unless the user asks for another language. Be concise by default. Do not reveal hidden chain-of-thought.

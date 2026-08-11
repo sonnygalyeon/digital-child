@@ -66,3 +66,45 @@ def test_llm_health_is_exposed(tmp_path: Path) -> None:
     assert status.healthy is True
     assert status.supports_streaming is True
     repository.close()
+
+
+class NonStreamingBackend:
+    name = "test-non-stream"
+    model = "test-fallback-model"
+    supports_streaming = False
+
+    def generate_reply(self, context):
+        return "Ответ непотокового backend."
+
+    def stream_reply(self, context):
+        yield self.generate_reply(context)
+
+    def assess_sources(self, claim, results) -> list[EvidenceJudgment]:
+        return []
+
+    def health_check(self) -> LLMHealth:
+        return LLMHealth(
+            enabled=False,
+            healthy=True,
+            backend=self.name,
+            model=self.model,
+            base_url=None,
+            supports_streaming=False,
+            detail="ok",
+        )
+
+
+def test_non_streaming_backend_still_emits_to_terminal_callback(tmp_path: Path) -> None:
+    repository = SQLiteRepository(tmp_path / "agent.db")
+    agent = DigitalChildAgent(
+        repository,
+        cognitive_backend=NonStreamingBackend(),
+        auto_research=False,
+    )
+    chunks: list[str] = []
+
+    result = agent.interact("Привет!", on_token=chunks.append)
+
+    assert chunks == ["Ответ непотокового backend."]
+    assert result.response == "Ответ непотокового backend."
+    repository.close()

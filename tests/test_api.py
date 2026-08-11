@@ -8,7 +8,7 @@ from digital_child.api import create_app
 def test_api_supports_beliefs_and_consolidation(tmp_path: Path) -> None:
     app = create_app(tmp_path / "api.db")
     with TestClient(app) as client:
-        assert client.get("/health").json()["version"] == "0.3.0"
+        assert client.get("/health").json()["version"] == "0.5.0"
         payload = {
             "content": "Красная кнопка включает лампу",
             "source_kind": "caregiver",

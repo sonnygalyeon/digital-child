@@ -1,7 +1,7 @@
 [project]
 name = "digital-child-windows-host"
-version = "0.1.0"
-description = "Authenticated OpenAI-compatible Windows gateway for a local Ollama LLM, with optional PostgreSQL audit storage."
+version = "0.2.0"
+description = "CPU-optimized authenticated Windows Ollama gateway with warmup, latency metrics and optional PostgreSQL audit storage."
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "fastapi>=0.115,<1",

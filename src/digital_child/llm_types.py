@@ -27,3 +27,5 @@ class ReplyContext:
     conversation_history: list[ConversationMessage]
     development_stage: str
     total_deu: float
+    needs_summary: str = "нет данных"
+    active_goal_summary: str = "нет выбранной цели"

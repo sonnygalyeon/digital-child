@@ -8,6 +8,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from digital_child import __version__
 from digital_child.agent import DigitalChildAgent
 from digital_child.developmental_age import psychological_age_equivalent
 from digital_child.models import (
@@ -24,9 +25,14 @@ from digital_child.models import (
     IdentityProfile,
     InteractionResult,
     ConversationMessage,
+    CognitiveEvent,
+    CognitiveLoopStatus,
+    DriveSignal,
     LLMHealth,
     MemorySummary,
+    NeedState,
     Observation,
+    ResourceBudget,
     RelationshipProfile,
     ResearchReport,
     SourceRecord,
@@ -55,13 +61,14 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.agent = create_agent(database_path)
+        app.state.agent.start_cognitive_loop()
         yield
-        app.state.agent.repository.close()
+        app.state.agent.close()
 
     application = FastAPI(
         title="Digital Child API",
-        version="0.3.0",
-        description="Full LLM integration, streaming cognition, autonomy, memory and epistemic verification.",
+        version=__version__,
+        description="Event-driven needs, self-generated goals, bounded cognitive loop, memory and LLM integration.",
         lifespan=lifespan,
     )
 
@@ -82,7 +89,7 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
 
     @application.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "version": "0.3.0"}
+        return {"status": "ok", "version": __version__}
 
     @application.get("/v1/state", response_model=StateResponse)
     def get_state(request: Request) -> StateResponse:
@@ -93,6 +100,10 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             emotion=agent.emotion,
             psychological_age_equivalent=psychological_age_equivalent(agent.profile),
         )
+
+    @application.get("/v1/diagnostics")
+    def diagnostics(request: Request) -> dict[str, object]:
+        return get_agent(request).diagnostics()
 
     @application.get("/v1/llm", response_model=LLMHealth)
     def llm_health(request: Request) -> LLMHealth:
@@ -115,6 +126,40 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             max(1, min(limit, 500)),
             active_only=active_only,
         )
+
+    @application.get("/v1/needs", response_model=list[NeedState])
+    def needs(request: Request) -> list[NeedState]:
+        return get_agent(request).cognitive_loop.needs()
+
+    @application.get("/v1/drives", response_model=list[DriveSignal])
+    def drives(request: Request) -> list[DriveSignal]:
+        return get_agent(request).cognitive_loop.drives()
+
+    @application.get("/v1/background", response_model=CognitiveLoopStatus)
+    def background(request: Request) -> CognitiveLoopStatus:
+        return get_agent(request).cognitive_loop.status
+
+    @application.get("/v1/background/events", response_model=list[CognitiveEvent])
+    def background_events(request: Request, limit: int = 100) -> list[CognitiveEvent]:
+        return get_agent(request).repository.recent_cognitive_events(
+            max(1, min(limit, 500))
+        )
+
+    @application.get("/v1/background/budgets", response_model=list[ResourceBudget])
+    def background_budgets(request: Request) -> list[ResourceBudget]:
+        return get_agent(request).cognitive_loop.budgets.list()
+
+    @application.post("/v1/background/pause", response_model=CognitiveLoopStatus)
+    def pause_background(request: Request) -> CognitiveLoopStatus:
+        return get_agent(request).pause_cognitive_loop()
+
+    @application.post("/v1/background/resume", response_model=CognitiveLoopStatus)
+    def resume_background(request: Request) -> CognitiveLoopStatus:
+        return get_agent(request).resume_cognitive_loop()
+
+    @application.post("/v1/background/tick", response_model=CognitiveLoopStatus)
+    def tick_background(request: Request) -> CognitiveLoopStatus:
+        return get_agent(request).cognitive_tick()
 
     @application.post("/v1/interactions", response_model=InteractionResult)
     def interact(payload: InteractionRequest, request: Request) -> InteractionResult:

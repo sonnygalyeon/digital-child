@@ -65,6 +65,7 @@ class PostgresAuditStore:
                     streamed BOOLEAN NOT NULL,
                     status_code INTEGER NOT NULL,
                     duration_ms INTEGER NOT NULL,
+                    first_token_ms INTEGER,
                     request_bytes INTEGER NOT NULL,
                     response_bytes INTEGER NOT NULL,
                     content_sha256 TEXT NOT NULL,
@@ -72,6 +73,9 @@ class PostgresAuditStore:
                     request_content JSONB
                 )
                 """
+            )
+            connection.execute(
+                "ALTER TABLE llm_request_audit ADD COLUMN IF NOT EXISTS first_token_ms INTEGER"
             )
             connection.execute(
                 """
@@ -96,9 +100,9 @@ class PostgresAuditStore:
                 """
                 INSERT INTO llm_request_audit (
                     id, created_at, client_id, model, streamed, status_code,
-                    duration_ms, request_bytes, response_bytes, content_sha256,
+                    duration_ms, first_token_ms, request_bytes, response_bytes, content_sha256,
                     error_type, request_content
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     record.id,
@@ -108,6 +112,7 @@ class PostgresAuditStore:
                     record.streamed,
                     record.status_code,
                     record.duration_ms,
+                    record.first_token_ms,
                     record.request_bytes,
                     record.response_bytes,
                     record.content_sha256,
@@ -125,7 +130,7 @@ class PostgresAuditStore:
             rows = connection.execute(
                 """
                 SELECT id, created_at, client_id, model, streamed, status_code,
-                       duration_ms, request_bytes, response_bytes, content_sha256,
+                       duration_ms, first_token_ms, request_bytes, response_bytes, content_sha256,
                        error_type
                 FROM llm_request_audit
                 ORDER BY created_at DESC
@@ -142,10 +147,11 @@ class PostgresAuditStore:
                 "streamed": row[4],
                 "status_code": row[5],
                 "duration_ms": row[6],
-                "request_bytes": row[7],
-                "response_bytes": row[8],
-                "content_sha256": row[9],
-                "error_type": row[10],
+                "first_token_ms": row[7],
+                "request_bytes": row[8],
+                "response_bytes": row[9],
+                "content_sha256": row[10],
+                "error_type": row[11],
             }
             for row in rows
         ]

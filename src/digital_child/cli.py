@@ -15,9 +15,10 @@ from digital_child.models import (
     Observation,
     SourceKind,
 )
+from digital_child.console import configure_utf8_console
+from digital_child.face_controller import FaceWindowController
 from digital_child.service import create_agent
-from digital_child.terminal_face import TerminalFaceRenderer
-from digital_child.terminal_ui import TerminalFaceApp
+from digital_child.terminal_chat import TerminalChatApp
 
 
 
@@ -51,10 +52,19 @@ def build_caregiver_observation(
 HELP_TEXT = """Команды:
   /help                         показать справку
   /state                        развитие, состояние и психологический возраст
+  /diagnostics                  сводная диагностика всех подсистем
   /llm                          состояние подключения полноценной LLM
   /history [N]                  сохранённая история диалога
   /identity                     самомодель и вопросы первого пробуждения
-  /goals [N]                    собственные активные цели
+  /goals [N]                    активные и предложенные цели
+  /needs                        текущие внутренние потребности
+  /drives                       активные внутренние импульсы
+  /background                   состояние когнитивного цикла
+  /budgets                      операционные бюджеты автономии
+  /events [N]                   последние внутренние события
+  /pause                        приостановить внутренний цикл
+  /resume                       возобновить внутренний цикл
+  /tick                         выполнить один безопасный цикл вручную
   /trust                        отношение к локальному собеседнику
   /beliefs [N]                  убеждения с уверенностью и противоречиями
   /research <утверждение>       принудительно проверить утверждение в интернете
@@ -100,8 +110,12 @@ class ChatCommandRouter:
                 "emotion": self.agent.emotion.model_dump(mode="json"),
                 "backend": self.agent.cognitive_backend.name,
                 "research_provider": self.agent.research_engine.provider.name,
+                "cognitive_loop": self.agent.cognitive_loop.status.model_dump(mode="json"),
+                "active_goal": self.agent._active_goal_summary(),
             }
             return json.dumps(payload, ensure_ascii=False, indent=2)
+        if text == "/diagnostics":
+            return json.dumps(self.agent.diagnostics(), ensure_ascii=False, indent=2)
         if text == "/llm":
             return self.agent.llm_health().model_dump_json(indent=2)
         if text.startswith("/history"):
@@ -124,10 +138,55 @@ class ChatCommandRouter:
             if not goals:
                 return "Целей пока нет."
             return "\n".join(
-                f"- [{goal.status.value}] p={goal.priority:.2f} progress={goal.progress:.2f} | "
+                f"- [{goal.status.value}/{goal.origin.value}] p={goal.priority:.2f} "
+                f"urgency={goal.urgency:.2f} progress={goal.progress:.2f} "
+                f"selected={goal.selection_count} need="
+                f"{None if goal.need_kind is None else goal.need_kind.value} | "
                 f"{goal.title}: {goal.description}"
                 for goal in goals
             )
+        if text == "/needs":
+            needs = self.agent.cognitive_loop.needs()
+            return "\n".join(
+                f"- {item.kind.value}: {item.level:.3f} "
+                f"(baseline={item.baseline:.2f}, stimulation={item.total_stimulation:.3f})"
+                for item in needs
+            )
+        if text == "/drives":
+            drives = self.agent.cognitive_loop.drives()
+            if not drives:
+                return "Сильных внутренних импульсов сейчас нет."
+            return "\n".join(
+                f"- [{item.kind.value}] intensity={item.intensity:.3f} "
+                f"need={item.need_kind.value} | {item.title}: {item.rationale}"
+                for item in drives
+            )
+        if text == "/background":
+            return self.agent.cognitive_loop.status.model_dump_json(indent=2)
+        if text == "/budgets":
+            return "\n".join(
+                f"- {item.name}: used={item.used}/{item.limit}, remaining={item.remaining}, "
+                f"window={item.window_key}"
+                for item in self.agent.cognitive_loop.budgets.list()
+            )
+        if text.startswith("/events"):
+            limit = _parse_limit(text, 20)
+            if limit is None:
+                return "Количество должно быть целым числом."
+            events = self.agent.repository.recent_cognitive_events(limit)
+            if not events:
+                return "Внутренних событий пока нет."
+            return "\n".join(
+                f"- #{event.sequence} [{event.kind.value}] processed={event.processed} "
+                f"source={event.source} importance={event.importance:.2f}"
+                for event in events
+            )
+        if text == "/pause":
+            return self.agent.pause_cognitive_loop().model_dump_json(indent=2)
+        if text == "/resume":
+            return self.agent.resume_cognitive_loop().model_dump_json(indent=2)
+        if text == "/tick":
+            return self.agent.cognitive_tick().model_dump_json(indent=2)
         if text == "/trust":
             relationship = self.agent.trust_engine.get_or_create(self.person_id)
             return relationship.model_dump_json(indent=2)
@@ -300,24 +359,38 @@ class ChatCommandRouter:
 
 def _opening_lines(agent) -> list[str]:
     if agent.genesis_event is None:
-        return ["Личность восстановлена из долговременной памяти. /help — команды."]
-    return [
-        "=== ПЕРВОЕ ПРОБУЖДЕНИЕ ===",
-        *agent.genesis_event.monologue,
-        "Вопросы, которые я сохраняю:",
-        *[f"• {question}" for question in agent.genesis_event.questions],
-        "Введите /help для списка команд.",
-    ]
+        lines = ["Личность восстановлена из долговременной памяти. /help — команды."]
+    else:
+        lines = [
+            "=== ПЕРВОЕ ПРОБУЖДЕНИЕ ===",
+            *agent.genesis_event.monologue,
+            "Вопросы, которые я сохраняю:",
+            *[f"• {question}" for question in agent.genesis_event.questions],
+            "Введите /help для списка команд.",
+        ]
+
+    health = agent.llm_health()
+    if not health.enabled:
+        lines.append(
+            "⚠ Полноценная LLM не настроена: используется rule-based fallback. "
+            "Проверь .env командой /llm."
+        )
+    elif not health.healthy:
+        lines.append(
+            f"⚠ LLM настроена, но endpoint недоступен: {health.detail} "
+            "Проверь Windows-host и команду /llm."
+        )
+    return lines
 
 
-def run_simple_chat(database_path: Path, auto_research: bool) -> None:
+def run_plain_chat(database_path: Path, auto_research: bool, cognitive_loop: bool = True) -> None:
     agent = create_agent(database_path, auto_research=auto_research)
     router = ChatCommandRouter(agent)
-    renderer = TerminalFaceRenderer()
+    if cognitive_loop:
+        agent.start_cognitive_loop()
     try:
         for line in _opening_lines(agent):
             print(line)
-        print("\n".join(renderer.render(agent.emotion, 5).lines))
         while True:
             try:
                 text = input("\nВы> ").strip()
@@ -330,46 +403,79 @@ def run_simple_chat(database_path: Path, auto_research: bool) -> None:
                 break
             print(f"Агент> {router.handle(text)}")
     finally:
-        agent.repository.close()
+        agent.close()
 
 
-def run_face_chat(
+def run_desktop_chat(
     database_path: Path,
     *,
-    ascii_only: bool,
     auto_research: bool,
+    face_window: bool,
+    cognitive_loop: bool = True,
 ) -> None:
     agent = create_agent(database_path, auto_research=auto_research)
     router = ChatCommandRouter(agent)
-    app = TerminalFaceApp(
+    face = FaceWindowController(title=f"{agent.identity.display_name} — Digital Child") if face_window else None
+    if face is not None and not face.start():
+        print(
+            "[лицо] PySide6 не установлен. Выполни: "
+            "uv sync --extra dev --extra desktop"
+        )
+        face = None
+    app = TerminalChatApp(
         handler=router.handle,
         stream_handler=router.handle_stream,
         emotion_getter=lambda: agent.emotion,
         opening_lines=_opening_lines(agent),
-        ascii_only=ascii_only,
+        face=face,
     )
+    agent.set_background_notifier(app.notify)
+    if cognitive_loop:
+        agent.start_cognitive_loop()
     try:
         app.run()
     finally:
-        agent.repository.close()
+        if face is not None:
+            face.close()
+        agent.close()
 
 
 def main() -> None:
+    configure_utf8_console()
     parser = argparse.ArgumentParser(
         prog="digital-child",
-        description="Digital Child v0.3.0: full streaming LLM and persistent cognitive context.",
+        description=(
+            "Digital Child v0.5.0: event-driven needs, self-generated goals, "
+            "goal arbitration and a bounded autonomous cognitive loop."
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    chat_parser = subparsers.add_parser("chat", help="Запустить терминальное общение")
+    chat_parser = subparsers.add_parser("chat", help="Запустить общение")
     chat_parser.add_argument("--db", type=Path, default=Path("data/digital_child.db"))
-    chat_parser.add_argument("--no-face", action="store_true", help="Обычный строковый режим")
-    chat_parser.add_argument("--ascii", action="store_true", help="ASCII вместо Unicode")
+    chat_parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="Обычный input()/print() без Prompt Toolkit",
+    )
+    chat_parser.add_argument(
+        "--no-face-window",
+        action="store_true",
+        help="Не запускать отдельное графическое окно лица",
+    )
     chat_parser.add_argument(
         "--no-auto-research",
         action="store_true",
         help="Не запускать поиск автоматически для фактических утверждений",
     )
+    chat_parser.add_argument(
+        "--no-cognitive-loop",
+        action="store_true",
+        help="Не запускать автономный фоновый когнитивный цикл",
+    )
+
+    face_parser = subparsers.add_parser("face", help="Проверить отдельное окно лица")
+    face_parser.add_argument("--seconds", type=float, default=0.0)
 
     llm_parser = subparsers.add_parser("llm", help="Проверить подключение LLM")
     llm_parser.add_argument("--db", type=Path, default=Path("data/digital_child.db"))
@@ -381,22 +487,45 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "chat":
         auto_research = not args.no_auto_research
-        use_face = not args.no_face and sys.stdin.isatty() and sys.stdout.isatty()
-        if use_face:
-            run_face_chat(
+        if args.plain or not (sys.stdin.isatty() and sys.stdout.isatty()):
+            run_plain_chat(
                 args.db,
-                ascii_only=args.ascii,
                 auto_research=auto_research,
+                cognitive_loop=not args.no_cognitive_loop,
             )
         else:
-            run_simple_chat(args.db, auto_research=auto_research)
+            run_desktop_chat(
+                args.db,
+                auto_research=auto_research,
+                face_window=not args.no_face_window,
+                cognitive_loop=not args.no_cognitive_loop,
+            )
+        return
+    if args.command == "face":
+        import time
+
+        controller = FaceWindowController()
+        if not controller.start():
+            parser.error(
+                "PySide6 не установлен. Выполни: uv sync --extra dev --extra desktop"
+            )
+        try:
+            if args.seconds > 0:
+                time.sleep(args.seconds)
+            else:
+                while controller.running:
+                    time.sleep(0.2)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            controller.close()
         return
     if args.command == "llm":
         agent = create_agent(args.db)
         try:
             print(agent.llm_health().model_dump_json(indent=2))
         finally:
-            agent.repository.close()
+            agent.close()
         return
     if args.command == "serve":
         uvicorn.run("digital_child.api:app", host=args.host, port=args.port, reload=False)

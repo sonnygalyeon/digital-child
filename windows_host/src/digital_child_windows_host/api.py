@@ -32,16 +32,39 @@ def _client_id(request: Request, settings: HostSettings) -> str:
     return f"{settings.instance_name}:{host}"
 
 
-def _safe_payload_for_storage(payload: dict[str, Any], store_content: bool) -> dict[str, Any] | None:
-    if not store_content:
-        return None
-    return payload
+def _safe_payload_for_storage(
+    payload: dict[str, Any], store_content: bool
+) -> dict[str, Any] | None:
+    return payload if store_content else None
 
+
+def _prepare_payload(payload: dict[str, Any], settings: HostSettings) -> dict[str, Any]:
+    prepared = dict(payload)
+    model = str(prepared.get("model") or settings.default_model)
+    if model not in settings.allowed_models:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Model '{model}' is not allowed on this host.",
+        )
+    prepared["model"] = model
+
+    requested_tokens = prepared.get("max_tokens", settings.max_output_tokens)
+    try:
+        requested_tokens = int(requested_tokens)
+    except (TypeError, ValueError):
+        requested_tokens = settings.max_output_tokens
+    prepared["max_tokens"] = max(16, min(requested_tokens, settings.max_output_tokens))
+
+    # Ollama's OpenAI compatibility supports reasoning_effort. CPU mode defaults to none.
+    prepared.setdefault("reasoning_effort", settings.reasoning_effort)
+    if prepared.get("stream"):
+        prepared.setdefault("stream_options", {"include_usage": True})
+    return prepared
 
 
 async def _safe_save(store: AuditStore, record: AuditRecord) -> None:
     try:
-        await _safe_save(store, record)
+        await asyncio.to_thread(store.save, record)
     except Exception:
         # Audit storage must never make model inference unavailable.
         return
@@ -52,15 +75,25 @@ def create_app(settings: HostSettings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        gateway = OllamaGateway(resolved.ollama_base_url, resolved.request_timeout)
+        gateway = OllamaGateway(
+            resolved.ollama_base_url,
+            resolved.ollama_native_url,
+            resolved.request_timeout,
+        )
         store = create_audit_store(resolved.postgres_dsn)
         await asyncio.to_thread(store.initialize)
         application.state.settings = resolved
         application.state.gateway = gateway
         application.state.store = store
+        warmup_task: asyncio.Task[bool] | None = None
+        if resolved.warmup_on_start:
+            warmup_task = asyncio.create_task(gateway.warmup(resolved.default_model))
+        application.state.warmup_task = warmup_task
         try:
             yield
         finally:
+            if warmup_task and not warmup_task.done():
+                warmup_task.cancel()
             await gateway.close()
             await asyncio.to_thread(store.close)
 
@@ -68,8 +101,8 @@ def create_app(settings: HostSettings | None = None) -> FastAPI:
         title="Digital Child Windows LLM Host",
         version=__version__,
         description=(
-            "Authenticated OpenAI-compatible LAN gateway. Ollama remains bound to localhost; "
-            "the gateway controls model access and optional PostgreSQL audit logging."
+            "Authenticated OpenAI-compatible LAN gateway with CPU-oriented limits, "
+            "model warmup and optional PostgreSQL performance audit."
         ),
         lifespan=lifespan,
     )
@@ -92,6 +125,9 @@ def create_app(settings: HostSettings | None = None) -> FastAPI:
             allowed_models=sorted(resolved.allowed_models),
             logical_cpu_count=logical_cpu_count(),
             total_memory_gib=total_memory_gib(),
+            reasoning_effort=resolved.reasoning_effort,
+            max_output_tokens=resolved.max_output_tokens,
+            warmup_on_start=resolved.warmup_on_start,
         )
 
     @app.get("/v1/models")
@@ -112,6 +148,13 @@ def create_app(settings: HostSettings | None = None) -> FastAPI:
         ]
         return {"object": "list", "data": data}
 
+    @app.post("/v1/host/warmup")
+    async def warmup(request: Request):
+        require_api_key(request, resolved)
+        gateway: OllamaGateway = request.app.state.gateway
+        ok = await gateway.warmup(resolved.default_model)
+        return {"ok": ok, "model": resolved.default_model}
+
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         require_api_key(request, resolved)
@@ -122,19 +165,14 @@ def create_app(settings: HostSettings | None = None) -> FastAPI:
                 detail="Request body exceeds configured limit.",
             )
         try:
-            payload = json.loads(body)
+            raw_payload = json.loads(body)
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=400, detail="Invalid JSON body.") from exc
-        if not isinstance(payload, dict):
+        if not isinstance(raw_payload, dict):
             raise HTTPException(status_code=400, detail="JSON body must be an object.")
 
-        model = str(payload.get("model") or resolved.default_model)
-        if model not in resolved.allowed_models:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Model '{model}' is not allowed on this host.",
-            )
-        payload["model"] = model
+        payload = _prepare_payload(raw_payload, resolved)
+        model = str(payload["model"])
         streamed = bool(payload.get("stream", False))
         started = time.perf_counter()
         request_hash = _content_hash(body)
@@ -143,12 +181,16 @@ def create_app(settings: HostSettings | None = None) -> FastAPI:
         store: AuditStore = request.app.state.store
 
         if streamed:
+
             async def iterator():
                 response_bytes = 0
                 status_code = 200
                 error_type: str | None = None
+                first_token_ms: int | None = None
                 try:
                     async for chunk in gateway.stream_chat(payload):
+                        if first_token_ms is None:
+                            first_token_ms = int((time.perf_counter() - started) * 1000)
                         response_bytes += len(chunk)
                         yield chunk
                 except httpx.HTTPStatusError as exc:
@@ -169,21 +211,24 @@ def create_app(settings: HostSettings | None = None) -> FastAPI:
                     yield b"data: " + message + b"\n\n"
                 finally:
                     if resolved.log_requests:
-                        record = AuditRecord(
-                            client_id=client_id,
-                            model=model,
-                            streamed=True,
-                            status_code=status_code,
-                            duration_ms=int((time.perf_counter() - started) * 1000),
-                            request_bytes=len(body),
-                            response_bytes=response_bytes,
-                            content_sha256=request_hash,
-                            error_type=error_type,
-                            request_content=_safe_payload_for_storage(
-                                payload, resolved.store_content
+                        await _safe_save(
+                            store,
+                            AuditRecord(
+                                client_id=client_id,
+                                model=model,
+                                streamed=True,
+                                status_code=status_code,
+                                duration_ms=int((time.perf_counter() - started) * 1000),
+                                first_token_ms=first_token_ms,
+                                request_bytes=len(body),
+                                response_bytes=response_bytes,
+                                content_sha256=request_hash,
+                                error_type=error_type,
+                                request_content=_safe_payload_for_storage(
+                                    payload, resolved.store_content
+                                ),
                             ),
                         )
-                        await _safe_save(store, record)
 
             return StreamingResponse(
                 iterator(),
@@ -192,6 +237,7 @@ def create_app(settings: HostSettings | None = None) -> FastAPI:
                     "Cache-Control": "no-cache",
                     "X-Accel-Buffering": "no",
                     "X-Digital-Child-Host": __version__,
+                    "X-Digital-Child-Model": model,
                 },
             )
 
@@ -209,26 +255,34 @@ def create_app(settings: HostSettings | None = None) -> FastAPI:
                 status_code=status_code,
                 content=parsed,
                 media_type=content_type,
-                headers={"X-Digital-Child-Host": __version__},
+                headers={
+                    "X-Digital-Child-Host": __version__,
+                    "X-Digital-Child-Model": model,
+                },
             )
         except httpx.HTTPError as exc:
             error_type = type(exc).__name__
             raise HTTPException(status_code=502, detail=f"Ollama unavailable: {exc}") from exc
         finally:
             if resolved.log_requests:
-                record = AuditRecord(
-                    client_id=client_id,
-                    model=model,
-                    streamed=False,
-                    status_code=status_code,
-                    duration_ms=int((time.perf_counter() - started) * 1000),
-                    request_bytes=len(body),
-                    response_bytes=response_bytes,
-                    content_sha256=request_hash,
-                    error_type=error_type,
-                    request_content=_safe_payload_for_storage(payload, resolved.store_content),
+                await _safe_save(
+                    store,
+                    AuditRecord(
+                        client_id=client_id,
+                        model=model,
+                        streamed=False,
+                        status_code=status_code,
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        first_token_ms=None,
+                        request_bytes=len(body),
+                        response_bytes=response_bytes,
+                        content_sha256=request_hash,
+                        error_type=error_type,
+                        request_content=_safe_payload_for_storage(
+                            payload, resolved.store_content
+                        ),
+                    ),
                 )
-                await _safe_save(store, record)
 
     @app.get("/v1/host/audit/recent")
     async def recent_audit(request: Request, limit: int = 50):

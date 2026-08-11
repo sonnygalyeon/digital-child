@@ -52,7 +52,7 @@ class WikipediaSearchProvider:
         url = f"https://{self.language}.wikipedia.org/w/api.php?{params}"
         request = urllib.request.Request(
             url,
-            headers={"User-Agent": "DigitalChild/0.2.5 research prototype"},
+            headers={"User-Agent": "DigitalChild/0.4.1 research"},
         )
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))

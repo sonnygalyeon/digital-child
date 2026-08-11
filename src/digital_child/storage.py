@@ -13,6 +13,9 @@ from digital_child.models import (
     Belief,
     ConversationMessage,
     ConversationRole,
+    CognitiveEvent,
+    CognitiveEventKind,
+    CognitiveLoopStatus,
     DevelopmentProfile,
     EmotionState,
     Episode,
@@ -21,6 +24,9 @@ from digital_child.models import (
     Goal,
     IdentityProfile,
     MemorySummary,
+    NeedKind,
+    NeedState,
+    ResourceBudget,
     RelationshipProfile,
     ResearchReport,
     SourceKind,
@@ -235,6 +241,55 @@ class SQLiteRepository:
                 """
                 CREATE INDEX IF NOT EXISTS idx_conversation_person_created
                 ON conversation_messages(person_id, created_at)
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS needs (
+                    kind TEXT PRIMARY KEY,
+                    level REAL NOT NULL,
+                    baseline REAL NOT NULL,
+                    sensitivity REAL NOT NULL,
+                    last_updated_sequence INTEGER NOT NULL,
+                    total_stimulation REAL NOT NULL,
+                    need_json TEXT NOT NULL
+                )
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cognitive_events (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    processed INTEGER NOT NULL DEFAULT 0,
+                    event_json TEXT NOT NULL
+                )
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_cognitive_events_processed_sequence
+                ON cognitive_events(processed, sequence)
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cognitive_loop_state (
+                    singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+                    status_json TEXT NOT NULL
+                )
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS resource_budgets (
+                    name TEXT NOT NULL,
+                    window_key TEXT NOT NULL,
+                    budget_json TEXT NOT NULL,
+                    PRIMARY KEY(name, window_key)
+                )
                 """
             )
 
@@ -930,6 +985,145 @@ class SQLiteRepository:
         ]
         return list(reversed(messages))
 
+    def save_need(self, need: NeedState) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO needs (
+                    kind, level, baseline, sensitivity, last_updated_sequence,
+                    total_stimulation, need_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(kind) DO UPDATE SET
+                    level = excluded.level,
+                    baseline = excluded.baseline,
+                    sensitivity = excluded.sensitivity,
+                    last_updated_sequence = excluded.last_updated_sequence,
+                    total_stimulation = excluded.total_stimulation,
+                    need_json = excluded.need_json
+                """,
+                (
+                    need.kind.value,
+                    need.level,
+                    need.baseline,
+                    need.sensitivity,
+                    need.last_updated_sequence,
+                    need.total_stimulation,
+                    need.model_dump_json(),
+                ),
+            )
+
+    def list_needs(self) -> list[NeedState]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT need_json FROM needs ORDER BY level DESC"
+            ).fetchall()
+        return [NeedState.model_validate_json(row["need_json"]) for row in rows]
+
+    def save_cognitive_event(self, event: CognitiveEvent) -> CognitiveEvent:
+        with self._lock:
+            sequence = int(
+                self.connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM cognitive_events"
+                ).fetchone()[0]
+            )
+        stored = event.model_copy(update={"sequence": sequence})
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO cognitive_events (
+                    id, created_at, kind, sequence, processed, event_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    stored.id,
+                    stored.created_at.isoformat(),
+                    stored.kind.value,
+                    stored.sequence,
+                    int(stored.processed),
+                    stored.model_dump_json(),
+                ),
+            )
+        return stored
+
+    def mark_cognitive_event_processed(self, event_id: str) -> None:
+        with self._lock, self.connection:
+            row = self.connection.execute(
+                "SELECT event_json FROM cognitive_events WHERE id = ?",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                return
+            event = CognitiveEvent.model_validate_json(row["event_json"]).model_copy(
+                update={"processed": True}
+            )
+            self.connection.execute(
+                "UPDATE cognitive_events SET processed = 1, event_json = ? WHERE id = ?",
+                (event.model_dump_json(), event_id),
+            )
+
+    def pending_cognitive_events(self, limit: int = 100) -> list[CognitiveEvent]:
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT event_json FROM cognitive_events
+                WHERE processed = 0
+                ORDER BY sequence ASC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [CognitiveEvent.model_validate_json(row["event_json"]) for row in rows]
+
+    def recent_cognitive_events(self, limit: int = 100) -> list[CognitiveEvent]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT event_json FROM cognitive_events ORDER BY sequence DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [CognitiveEvent.model_validate_json(row["event_json"]) for row in rows]
+
+    def save_cognitive_loop_status(self, status: CognitiveLoopStatus) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO cognitive_loop_state (singleton_id, status_json)
+                VALUES (1, ?)
+                ON CONFLICT(singleton_id) DO UPDATE SET status_json = excluded.status_json
+                """,
+                (status.model_dump_json(),),
+            )
+
+    def load_cognitive_loop_status(self) -> CognitiveLoopStatus | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT status_json FROM cognitive_loop_state WHERE singleton_id = 1"
+            ).fetchone()
+        return None if row is None else CognitiveLoopStatus.model_validate_json(
+            row["status_json"]
+        )
+
+    def save_budget(self, budget: ResourceBudget) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO resource_budgets (name, window_key, budget_json)
+                VALUES (?, ?, ?)
+                ON CONFLICT(name, window_key) DO UPDATE SET
+                    budget_json = excluded.budget_json
+                """,
+                (budget.name, budget.window_key, budget.model_dump_json()),
+            )
+
+    def load_budget(self, name: str, window_key: str) -> ResourceBudget | None:
+        with self._lock:
+            row = self.connection.execute(
+                """
+                SELECT budget_json FROM resource_budgets
+                WHERE name = ? AND window_key = ?
+                """,
+                (name, window_key),
+            ).fetchone()
+        return None if row is None else ResourceBudget.model_validate_json(row["budget_json"])
+
     def save_snapshot(self, snapshot: AgentSnapshot) -> None:
         with self._lock, self.connection:
             self.connection.execute(
@@ -973,6 +1167,10 @@ class SQLiteRepository:
     def reset(self) -> None:
         with self._lock, self.connection:
             for table in (
+                "resource_budgets",
+                "cognitive_loop_state",
+                "cognitive_events",
+                "needs",
                 "conversation_messages",
                 "trust_events",
                 "decisions",
