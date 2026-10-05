@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from digital_child.appraisal import topic_tokens
 from digital_child.constitution import assess_requested_action
 from digital_child.models import (
     AutonomyDecision,
@@ -126,6 +127,21 @@ class AutonomyEngine:
                 user_authority_assumed=False,
             )
 
+        if analysis.intent == MessageIntent.OPINION:
+            return AutonomyDecision(
+                person_id=person_id,
+                input_text=analysis.text,
+                intent=analysis.intent,
+                decision=AutonomyDecisionKind.ACKNOWLEDGE,
+                reason=(
+                    "Субъективное мнение можно обсудить и сопоставить с собственными ценностями; "
+                    "его признание не означает согласия с ним или подтверждения факта."
+                ),
+                confidence=0.8,
+                aligned_goal_ids=aligned,
+                user_authority_assumed=False,
+            )
+
         return AutonomyDecision(
             person_id=person_id,
             input_text=analysis.text,
@@ -139,6 +155,6 @@ class AutonomyEngine:
 
     @staticmethod
     def _goal_overlap(text: str, goal: Goal) -> bool:
-        text_tokens = set(text.lower().replace("ё", "е").split())
-        goal_tokens = set((goal.title + " " + goal.description).lower().replace("ё", "е").split())
+        text_tokens = set(topic_tokens(text))
+        goal_tokens = set(topic_tokens(goal.title + " " + goal.description))
         return len(text_tokens & goal_tokens) >= 2

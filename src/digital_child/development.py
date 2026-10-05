@@ -19,6 +19,31 @@ class StageRule:
 
 STAGE_RULES: list[tuple[DevelopmentStage, StageRule]] = [
     (
+        DevelopmentStage.REFLECTIVE,
+        StageRule(
+            total_deu=100_000,
+            minimum_domains={
+                DevelopmentDomain.PLANNING: 8_000,
+                DevelopmentDomain.METACOGNITION: 12_000,
+                DevelopmentDomain.SOCIAL_UNDERSTANDING: 8_000,
+                DevelopmentDomain.SELF_MODEL: 8_000,
+            },
+        ),
+    ),
+    (
+        DevelopmentStage.EXPERIENCED,
+        StageRule(
+            total_deu=40_000,
+            minimum_domains={
+                DevelopmentDomain.PLANNING: 5_000,
+                DevelopmentDomain.METACOGNITION: 3_000,
+                DevelopmentDomain.SOCIAL_UNDERSTANDING: 2_000,
+                DevelopmentDomain.SELF_MODEL: 1_500,
+                DevelopmentDomain.CAUSAL_REASONING: 3_000,
+            },
+        ),
+    ),
+    (
         DevelopmentStage.MATURE,
         StageRule(
             total_deu=10_000,
@@ -78,7 +103,11 @@ class DevelopmentEngine:
             profile.domain_experience.setdefault(domain, 0.0)
             profile.domain_experience[domain] += gained
 
-        profile.stage = self._resolve_stage(profile)
+        resolved = self._resolve_stage(profile)
+        stages = list(DevelopmentStage)
+        # Acquired developmental stages are not lost to an unrelated domain deficit.
+        if stages.index(resolved) > stages.index(profile.stage):
+            profile.stage = resolved
         return DevelopmentTransition(
             old_stage=old_stage,
             new_stage=profile.stage,

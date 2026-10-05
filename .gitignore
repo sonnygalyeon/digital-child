@@ -17,3 +17,7 @@ data/*.db-wal
 windows_host/.venv/
 windows_host/.env
 windows_host/.env.postgres
+.runtime/
+.desktop-install.json
+.env.windows-backup
+models/

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sys
 import threading
 import time
@@ -16,7 +15,6 @@ from prompt_toolkit.styles import Style
 from digital_child.face_controller import FaceWindowController
 from digital_child.models import EmotionName, EmotionState
 
-
 _COMMANDS = [
     "/help",
     "/state",
@@ -24,6 +22,11 @@ _COMMANDS = [
     "/llm",
     "/history",
     "/identity",
+    "/personality",
+    "/development",
+    "/behavior",
+    "/habits",
+    "/reflections",
     "/goals",
     "/needs",
     "/drives",
@@ -192,9 +195,12 @@ class TerminalChatApp:
             HTML(
                 "<title>╭" + "─" * width + "╮</title>\n"
                 "<title>│</title>  DIGITAL CHILD  <status>v0.5.0</status>"
-                + " " * 27
+                + " "
+                * 27
                 + "<title>│</title>\n"
-                "<title>│</title>  <status>" + backend + "</status>"
+                "<title>│</title>  <status>"
+                + backend
+                + "</status>"
                 + " " * max(1, width - len(backend) - 2)
                 + "<title>│</title>\n"
                 "<title>╰" + "─" * width + "╯</title>"

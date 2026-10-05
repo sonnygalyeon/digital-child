@@ -76,3 +76,26 @@ class TrustEngine:
             )
         )
         return updated
+
+    def apply_social_experience(self, person_id: str, delta: float) -> RelationshipProfile:
+        # Emotional familiarity is independent of whether factual claims are true.
+        relationship = self.get_or_create(person_id)
+        delta = max(-0.03, min(0.015, delta))
+        updated = relationship.model_copy(
+            update={
+                "updated_at": datetime.now(UTC),
+                "affective_trust": clamp(relationship.affective_trust + delta),
+            }
+        )
+        self.repository.save_relationship(updated)
+        if abs(delta) > 0.00001:
+            self.repository.save_trust_event(
+                TrustEvent(
+                    person_id=person_id,
+                    reason="observed_social_interaction",
+                    affective_delta=delta,
+                    epistemic_delta=0.0,
+                    deception_delta=0.0,
+                )
+            )
+        return updated

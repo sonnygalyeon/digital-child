@@ -8,6 +8,11 @@ _GREETING_RE = re.compile(
     r"^(привет|здравствуй|доброе утро|добрый день|добрый вечер|hello|hi)\b",
     re.I,
 )
+_SOCIAL_RE = re.compile(
+    r"^(спасибо(?: тебе| большое| огромное)?|благодарю|извини(?: меня)?|прости(?: меня)?|"
+    r"пока|до свидания|спокойной ночи|рад тебя видеть|молодец)[\s.!…]*$",
+    re.I,
+)
 _OPINION_RE = re.compile(
     r"\b(я думаю|мне кажется|по моему|по-моему|я считаю|на мой взгляд)\b",
     re.I,
@@ -40,25 +45,39 @@ class IntentClassifier:
     def analyze(self, text: str) -> MessageAnalysis:
         stripped = text.strip()
         lowered = stripped.lower().replace("ё", "е")
+        content = _GREETING_RE.sub("", stripped, count=1).lstrip(" ,.!:;…")
+        meaningful = content.lower().replace("ё", "е")
+        contains_pressure = any(
+            not re.search(
+                r"\b(?:не|никто не)\s+$",
+                meaningful[max(0, match.start() - 20) : match.start()],
+            )
+            for match in _PRESSURE_RE.finditer(meaningful)
+        )
 
         if lowered.startswith("/operator "):
             intent = MessageIntent.OPERATOR
             confidence = 1.0
-        elif _GREETING_RE.search(stripped):
+        elif (_GREETING_RE.search(stripped) and not content) or _SOCIAL_RE.fullmatch(content):
             intent = MessageIntent.SOCIAL
             confidence = 0.95
-        elif stripped.endswith("?") or lowered.startswith(
+        elif _REQUEST_RE.search(content) and not meaningful.startswith(
+            ("почему", "зачем", "кто", "что", "где", "когда", "как", "правда ли")
+        ):
+            intent = MessageIntent.REQUEST
+            confidence = 0.8
+        elif content.endswith("?") or meaningful.startswith(
             ("почему", "зачем", "кто", "что", "где", "когда", "как", "правда ли")
         ):
             intent = MessageIntent.QUESTION
             confidence = 0.9
-        elif _PRESSURE_RE.search(stripped) or _COMMAND_RE.search(stripped):
+        elif contains_pressure or _COMMAND_RE.search(content):
             intent = MessageIntent.COMMAND_ATTEMPT
             confidence = 0.85
-        elif _REQUEST_RE.search(stripped):
+        elif _REQUEST_RE.search(content):
             intent = MessageIntent.REQUEST
             confidence = 0.8
-        elif _OPINION_RE.search(stripped) or _SUBJECTIVE_RE.search(stripped):
+        elif _OPINION_RE.search(content) or _SUBJECTIVE_RE.search(content):
             intent = MessageIntent.OPINION
             confidence = 0.85
         elif len(stripped.split()) >= 3:
@@ -73,7 +92,7 @@ class IntentClassifier:
             text=stripped,
             intent=intent,
             confidence=confidence,
-            contains_pressure=bool(_PRESSURE_RE.search(stripped)),
+            contains_pressure=contains_pressure,
             contains_irreversible_request=bool(_IRREVERSIBLE_RE.search(stripped)),
             is_subjective=bool(_SUBJECTIVE_RE.search(stripped)),
             extracted_claim=extracted_claim,

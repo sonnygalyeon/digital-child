@@ -2,25 +2,30 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import uvicorn
 
+from digital_child.console import configure_utf8_console
 from digital_child.developmental_age import psychological_age_equivalent
+from digital_child.face_controller import FaceWindowController
 from digital_child.models import (
     ClaimEvidenceInput,
     DevelopmentDomain,
     EvidenceStance,
+    InteractionResult,
     Observation,
     SourceKind,
 )
-from digital_child.console import configure_utf8_console
-from digital_child.face_controller import FaceWindowController
 from digital_child.service import create_agent
 from digital_child.terminal_chat import TerminalChatApp
 
-
+if TYPE_CHECKING:
+    from digital_child.agent import DigitalChildAgent
 
 
 def build_caregiver_observation(
@@ -49,6 +54,7 @@ def build_caregiver_observation(
         tags=["caregiver_testimony"],
     )
 
+
 HELP_TEXT = """Команды:
   /help                         показать справку
   /state                        развитие, состояние и психологический возраст
@@ -56,6 +62,11 @@ HELP_TEXT = """Команды:
   /llm                          состояние подключения полноценной LLM
   /history [N]                  сохранённая история диалога
   /identity                     самомодель и вопросы первого пробуждения
+  /personality                  темперамент, характер, настроение и самомодель
+  /development                  возрастная регуляция и индивидуальная зрелость
+  /behavior                     оценка последней ситуации и выбор стратегии
+  /habits                       сформированные привычки и ожидания результата
+  /reflections                  значимые изменения и результаты исследований
   /goals [N]                    активные и предложенные цели
   /needs                        текущие внутренние потребности
   /drives                       активные внутренние импульсы
@@ -93,7 +104,7 @@ def _parse_limit(text: str, default: int = 10) -> int | None:
 
 
 class ChatCommandRouter:
-    def __init__(self, agent) -> None:
+    def __init__(self, agent: DigitalChildAgent) -> None:
         self.agent = agent
         self.person_id = "local-user"
 
@@ -112,6 +123,7 @@ class ChatCommandRouter:
                 "research_provider": self.agent.research_engine.provider.name,
                 "cognitive_loop": self.agent.cognitive_loop.status.model_dump(mode="json"),
                 "active_goal": self.agent._active_goal_summary(),
+                "psychology": self.agent.psychology.diagnostics(self.agent.profile),
             }
             return json.dumps(payload, ensure_ascii=False, indent=2)
         if text == "/diagnostics":
@@ -125,11 +137,33 @@ class ChatCommandRouter:
             messages = self.agent.repository.recent_conversation(self.person_id, limit)
             if not messages:
                 return "История диалога пока пуста."
-            return "\n".join(
-                f"- [{item.role.value}] {item.content}" for item in messages
-            )
+            return "\n".join(f"- [{item.role.value}] {item.content}" for item in messages)
         if text == "/identity":
             return self.agent.identity.model_dump_json(indent=2)
+        if text in {"/personality", "/development", "/behavior", "/habits", "/reflections"}:
+            data = self.agent.psychology.diagnostics(self.agent.profile)
+            selection = {
+                "/development": "development",
+                "/behavior": "last_behavior",
+                "/habits": "habits",
+                "/reflections": "reflections",
+            }
+            psychology_result = (
+                data.get(selection[text])
+                if text in selection
+                else {
+                    key: data[key]
+                    for key in (
+                        "temperament",
+                        "character",
+                        "values",
+                        "mood",
+                        "self_model",
+                        "interests",
+                    )
+                }
+            )
+            return json.dumps(psychology_result, ensure_ascii=False, indent=2)
         if text.startswith("/goals"):
             limit = _parse_limit(text)
             if limit is None:
@@ -217,8 +251,7 @@ class ChatCommandRouter:
             if not reports:
                 return "Отчётов проверки пока нет."
             return "\n".join(
-                f"- [{report.status.value}] {report.claim} | {report.summary}"
-                for report in reports
+                f"- [{report.status.value}] {report.claim} | {report.summary}" for report in reports
             )
         if text.startswith("/decisions"):
             limit = _parse_limit(text)
@@ -282,9 +315,9 @@ class ChatCommandRouter:
             return "\n".join(lines)
         if text.startswith("/teach "):
             # Compatibility command: this is still only testimony from the user.
-            payload = text.removeprefix("/teach ").strip()
+            teaching_text = text.removeprefix("/teach ").strip()
             return self._format_interaction(
-                self.agent.interact(payload, person_id=self.person_id)
+                self.agent.interact(teaching_text, person_id=self.person_id)
             )
         if text.startswith("/contradict "):
             claim = text.removeprefix("/contradict ").strip()
@@ -310,16 +343,14 @@ class ChatCommandRouter:
                     )
                 ],
             )
-            result = self.agent.process_observation(observation)
-            return result.response
+            observation_result = self.agent.process_observation(observation)
+            return observation_result.response
         if text.startswith("/"):
             return "Неизвестная команда. Используй /help."
 
-        return self._format_interaction(
-            self.agent.interact(text, person_id=self.person_id)
-        )
+        return self._format_interaction(self.agent.interact(text, person_id=self.person_id))
 
-    def handle_stream(self, text: str, on_token) -> str:
+    def handle_stream(self, text: str, on_token: Callable[[str], None]) -> str:
         if text.startswith("/"):
             return self.handle(text)
         result = self.agent.interact(
@@ -330,16 +361,14 @@ class ChatCommandRouter:
         return self._format_interaction_metadata(result)
 
     @staticmethod
-    def _format_interaction_metadata(result) -> str:
+    def _format_interaction_metadata(result: InteractionResult) -> str:
         lines = [
             f"[решение={result.decision.decision.value}; "
             f"намерение={result.analysis.intent.value}; "
             f"эмоция={result.emotion.dominant.value}]"
         ]
         if result.research is not None:
-            lines.append(
-                f"[проверка={result.research.status.value}] {result.research.summary}"
-            )
+            lines.append(f"[проверка={result.research.status.value}] {result.research.summary}")
         if result.deception is not None and result.deception.unlocked:
             lines.append(
                 "[оценка обмана] "
@@ -351,13 +380,12 @@ class ChatCommandRouter:
         return "\n".join(lines)
 
     @staticmethod
-    def _format_interaction(result) -> str:
+    def _format_interaction(result: InteractionResult) -> str:
         metadata = ChatCommandRouter._format_interaction_metadata(result)
         return f"{result.response}\n{metadata}"
 
 
-
-def _opening_lines(agent) -> list[str]:
+def _opening_lines(agent: DigitalChildAgent) -> list[str]:
     if agent.genesis_event is None:
         lines = ["Личность восстановлена из долговременной памяти. /help — команды."]
     else:
@@ -415,12 +443,13 @@ def run_desktop_chat(
 ) -> None:
     agent = create_agent(database_path, auto_research=auto_research)
     router = ChatCommandRouter(agent)
-    face = FaceWindowController(title=f"{agent.identity.display_name} — Digital Child") if face_window else None
+    face = (
+        FaceWindowController(title=f"{agent.identity.display_name} — Digital Child")
+        if face_window
+        else None
+    )
     if face is not None and not face.start():
-        print(
-            "[лицо] PySide6 не установлен. Выполни: "
-            "uv sync --extra dev --extra desktop"
-        )
+        print("[лицо] PySide6 не установлен. Выполни: uv sync --extra dev --extra desktop")
         face = None
     app = TerminalChatApp(
         handler=router.handle,
@@ -441,6 +470,7 @@ def run_desktop_chat(
 
 
 def main() -> None:
+    multiprocessing.freeze_support()
     configure_utf8_console()
     parser = argparse.ArgumentParser(
         prog="digital-child",
@@ -474,7 +504,12 @@ def main() -> None:
         help="Не запускать автономный фоновый когнитивный цикл",
     )
 
-    face_parser = subparsers.add_parser("face", help="Проверить отдельное окно лица")
+    desktop_parser = subparsers.add_parser("desktop", help="Оконный чат со слоистой сферой")
+    desktop_parser.add_argument("--db", type=Path, default=None)
+    desktop_parser.add_argument("--no-auto-research", action="store_true")
+    desktop_parser.add_argument("--no-cognitive-loop", action="store_true")
+
+    face_parser = subparsers.add_parser("face", help="Проверить отдельное окно сферы")
     face_parser.add_argument("--seconds", type=float, default=0.0)
 
     llm_parser = subparsers.add_parser("llm", help="Проверить подключение LLM")
@@ -485,6 +520,23 @@ def main() -> None:
     serve_parser.add_argument("--port", default=8000, type=int)
 
     args = parser.parse_args()
+    if args.command == "desktop":
+        if not FaceWindowController.dependency_available():
+            parser.error("Для оконного интерфейса выполните: uv sync --extra desktop")
+        import os
+
+        from digital_child.config import env_bool, load_dotenv
+        from digital_child.desktop_app import run_window
+
+        load_dotenv()
+        run_window(
+            args.db or Path(os.environ.get("DIGITAL_CHILD_DB", "data/digital_child.db")),
+            auto_research=(
+                not args.no_auto_research and env_bool("DIGITAL_CHILD_AUTO_RESEARCH", True)
+            ),
+            cognitive_loop=not args.no_cognitive_loop,
+        )
+        return
     if args.command == "chat":
         auto_research = not args.no_auto_research
         if args.plain or not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -506,9 +558,7 @@ def main() -> None:
 
         controller = FaceWindowController()
         if not controller.start():
-            parser.error(
-                "PySide6 не установлен. Выполни: uv sync --extra dev --extra desktop"
-            )
+            parser.error("PySide6 не установлен. Выполни: uv sync --extra dev --extra desktop")
         try:
             if args.seconds > 0:
                 time.sleep(args.seconds)

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 import threading
+from collections.abc import Callable
 
 from digital_child.autonomy import AutonomyEngine
 from digital_child.awakening import AwakeningEngine
 from digital_child.beliefs import BeliefEngine
-from digital_child.consolidation import MemoryConsolidator
 from digital_child.cognitive_loop import CognitiveLoop
+from digital_child.consolidation import MemoryConsolidator
 from digital_child.deception import DeceptionEngine
 from digital_child.development import DevelopmentEngine
 from digital_child.emotions import EmotionEngine
@@ -36,13 +36,17 @@ from digital_child.models import (
     GoalOrigin,
     GoalStatus,
     InteractionResult,
+    LLMHealth,
     MessageIntent,
     Observation,
+    ResearchReport,
     ResearchStatus,
     SourceKind,
     SourceRecord,
 )
 from digital_child.novelty import NoveltyEngine
+from digital_child.psychology import PsychologyEngine
+from digital_child.psychology_models import BehaviorTrace
 from digital_child.research import DisabledSearchProvider, ResearchEngine, SearchProvider
 from digital_child.storage import SQLiteRepository
 from digital_child.text import normalize_text
@@ -66,6 +70,8 @@ class DigitalChildAgent:
         research_mode: str = "blocking",
     ) -> None:
         self.repository = repository
+        self._interaction_lock = threading.RLock()
+        self._closed = threading.Event()
         self.experience_engine = ExperienceEngine()
         self.development_engine = DevelopmentEngine()
         self.novelty_engine = NoveltyEngine(repository)
@@ -84,7 +90,9 @@ class DigitalChildAgent:
             self.cognitive_backend,
         )
         self.auto_research = auto_research
-        self.research_mode = research_mode if research_mode in {"blocking", "background", "manual"} else "background"
+        self.research_mode = (
+            research_mode if research_mode in {"blocking", "background", "manual"} else "background"
+        )
         self.background_notifier: Callable[[str], None] | None = None
 
         snapshot = repository.load_snapshot()
@@ -100,14 +108,30 @@ class DigitalChildAgent:
 
         self.awakening_engine = AwakeningEngine(repository)
         self.identity, self.genesis_event = self.awakening_engine.ensure_awakened()
+        self.psychology = PsychologyEngine(repository, self.identity, self.profile)
         from digital_child.config import env_float
+
         self.cognitive_loop = CognitiveLoop(
             repository,
             notifier=self._notify_background,
             heartbeat_seconds=env_float("DIGITAL_CHILD_COGNITIVE_HEARTBEAT_SECONDS", 5.0),
+            behavior_policy_getter=lambda: self.psychology.goal_policy(self.profile),
         )
 
     def process_observation(
+        self,
+        observation: Observation,
+        *,
+        action: str = "observe",
+        outcome: str = "information_received",
+        reward: float = 0.0,
+    ) -> CycleResult:
+        with self._interaction_lock:
+            return self._process_observation(
+                observation, action=action, outcome=outcome, reward=reward
+            )
+
+    def _process_observation(
         self,
         observation: Observation,
         *,
@@ -162,8 +186,11 @@ class DigitalChildAgent:
                 )
             )
 
+        if action != "conversation":
+            self.psychology.observe(prepared, self.profile, stored_episode)
         self._persist_snapshot()
         return CycleResult(
+            episode_id=stored_episode.id,
             calculated_novelty=novelty,
             assessment=assessment,
             transition=transition,
@@ -176,6 +203,19 @@ class DigitalChildAgent:
         )
 
     def interact(
+        self,
+        text: str,
+        *,
+        person_id: str = "local-user",
+        force_research: bool = False,
+        on_token: Callable[[str], None] | None = None,
+    ) -> InteractionResult:
+        with self._interaction_lock:
+            return self._interact(
+                text, person_id=person_id, force_research=force_research, on_token=on_token
+            )
+
+    def _interact(
         self,
         text: str,
         *,
@@ -231,6 +271,23 @@ class DigitalChildAgent:
             goals=goals,
             verification_required=verification_required,
         )
+        episode = self.repository.get_episode(observation_result.episode_id or "")
+        if episode is None:
+            raise RuntimeError("Conversation experience was not persisted")
+        behavior = self.psychology.evaluate(
+            analysis=analysis,
+            profile=self.profile,
+            relationship=relationship,
+            base_decision=decision,
+            novelty=observation_result.calculated_novelty,
+            energy=self.state.energy,
+            episode=episode,
+        )
+        decision = behavior.decision
+        relationship = self.trust_engine.apply_social_experience(
+            person_id,
+            behavior.affective_trust_delta,
+        )
         self.repository.save_decision(decision)
         self.emit_cognitive_event(
             CognitiveEventKind.INTERACTION,
@@ -241,6 +298,8 @@ class DigitalChildAgent:
                 "decision": decision.decision.value,
                 "novelty": observation_result.calculated_novelty,
                 "contains_pressure": analysis.contains_pressure,
+                "psychological_load": behavior.trace.appraisal.overload,
+                "boredom": behavior.trace.appraisal.boredom,
             },
         )
         if analysis.intent == MessageIntent.CLAIM:
@@ -299,8 +358,7 @@ class DigitalChildAgent:
             )
 
         supported = bool(
-            research
-            and any(judgment.stance.value == "support" for judgment in research.judgments)
+            research and any(judgment.stance.value == "support" for judgment in research.judgments)
         )
         contradicted = bool(
             research
@@ -312,6 +370,8 @@ class DigitalChildAgent:
                 supported=supported,
                 contradicted=contradicted,
             )
+        if research is not None:
+            self.psychology.integrate_research(research, self.profile, behavior.trace)
 
         deception = self.deception_engine.assess(
             profile=self.profile,
@@ -326,6 +386,9 @@ class DigitalChildAgent:
             relationship=relationship,
             research=research,
             energy=self.state.energy,
+            appraisal=behavior.trace.appraisal,
+            development=behavior.development,
+            psychology=self.psychology.snapshot(),
         )
 
         context = ReplyContext(
@@ -340,13 +403,23 @@ class DigitalChildAgent:
                 if research_pending
                 else (None if research is None else research.summary)
             ),
-            personal_memory_summary=self._memory_summary(),
+            personal_memory_summary=self._memory_summary(text, person_id),
             beliefs_summary=self._beliefs_summary(),
             needs_summary=self._needs_summary(),
             active_goal_summary=self._active_goal_summary(),
             conversation_history=conversation_history,
             development_stage=self.profile.stage.value,
             total_deu=self.profile.total_deu,
+            psychology_summary=self.psychology.summary(self.psychology.snapshot()),
+            development_summary=(
+                f"регуляция={behavior.development.regulation:.2f}; "
+                f"рефлексия={behavior.development.reflection:.2f}; "
+                f"учёт другой точки зрения={behavior.development.perspective_taking:.2f}; "
+                f"горизонт планирования={behavior.development.planning_horizon:.2f}"
+            ),
+            behavior_guidance=tuple(behavior.trace.guidance),
+            behavior_style=behavior.trace.style,
+            coping_strategy=behavior.trace.coping,
         )
         try:
             if on_token is not None and self.cognitive_backend.supports_streaming:
@@ -384,6 +457,8 @@ class DigitalChildAgent:
                 metadata={
                     "research_status": None if research is None else research.status.value,
                     "emotion": self.emotion.dominant.value,
+                    "behavior_style": behavior.trace.style,
+                    "coping_strategy": behavior.trace.coping,
                 },
             )
         )
@@ -401,7 +476,7 @@ class DigitalChildAgent:
         )
         self._persist_snapshot()
         if research_pending and analysis.extracted_claim:
-            self._schedule_background_research(analysis.extracted_claim, person_id)
+            self._schedule_background_research(analysis.extracted_claim, person_id, behavior.trace)
         return InteractionResult(
             analysis=analysis,
             decision=decision,
@@ -415,20 +490,32 @@ class DigitalChildAgent:
     def set_background_notifier(self, notifier: Callable[[str], None] | None) -> None:
         self.background_notifier = notifier
 
-    def _perform_research(self, claim: str):
+    def _perform_research(self, claim: str) -> ResearchReport:
         research = self.research_engine.research(claim)
         self.repository.save_research_report(research)
         return research
 
-    def _schedule_background_research(self, claim: str, person_id: str) -> None:
+    def _schedule_background_research(
+        self,
+        claim: str,
+        person_id: str,
+        source_trace: BehaviorTrace | None = None,
+    ) -> None:
+        subject_id = self.identity.id
+
         def worker() -> None:
-            report = self._perform_research(claim)
+            report = self.research_engine.research(claim)
+            with self._interaction_lock:
+                if self._closed.is_set() or self.identity.id != subject_id:
+                    return
+                apply_result(report)
+
+        def apply_result(report: ResearchReport) -> None:
+            self.repository.save_research_report(report)
             self.epistemic_engine.apply_research_report(
                 report, current_sequence=self.repository.current_sequence()
             )
-            supported = any(
-                judgment.stance.value == "support" for judgment in report.judgments
-            )
+            supported = any(judgment.stance.value == "support" for judgment in report.judgments)
             contradicted = any(
                 judgment.stance.value == "contradict" for judgment in report.judgments
             )
@@ -437,6 +524,7 @@ class DigitalChildAgent:
                 self.trust_engine.apply_verification_outcome(
                     relationship, supported=supported, contradicted=contradicted
                 )
+            self.psychology.integrate_research(report, self.profile, source_trace)
             self.repository.save_audit(
                 "background_research_complete",
                 {
@@ -479,6 +567,10 @@ class DigitalChildAgent:
         return self.memory_consolidator.run()
 
     def rest(self, amount: float = 0.25) -> AgentState:
+        with self._interaction_lock:
+            return self._rest(amount)
+
+    def _rest(self, amount: float = 0.25) -> AgentState:
         amount = clamp_probability(amount)
         self.state.energy = clamp_probability(self.state.energy + amount)
         self.state.attention_capacity = clamp_probability(
@@ -488,6 +580,8 @@ class DigitalChildAgent:
         self.emotion = self.emotion.model_copy(
             update={"fatigue": clamp_probability(1.0 - self.state.energy)}
         )
+        self.psychology.rest(amount, self.profile)
+        self.emotion = self.emotion_engine.idle_decay(self.emotion, amount=amount * 0.3)
         self._persist_snapshot()
         self.emit_cognitive_event(
             CognitiveEventKind.REST,
@@ -498,6 +592,10 @@ class DigitalChildAgent:
         return self.state
 
     def reset(self) -> GenesisEvent | None:
+        with self._interaction_lock:
+            return self._reset()
+
+    def _reset(self) -> GenesisEvent | None:
         was_running = self.cognitive_loop.status.running
         self.cognitive_loop.stop()
         self.repository.reset()
@@ -506,11 +604,14 @@ class DigitalChildAgent:
         self.emotion = EmotionState()
         self._persist_snapshot()
         self.identity, self.genesis_event = self.awakening_engine.ensure_awakened()
+        self.psychology = PsychologyEngine(self.repository, self.identity, self.profile)
         from digital_child.config import env_float
+
         self.cognitive_loop = CognitiveLoop(
             self.repository,
             notifier=self._notify_background,
             heartbeat_seconds=env_float("DIGITAL_CHILD_COGNITIVE_HEARTBEAT_SECONDS", 5.0),
+            behavior_policy_getter=lambda: self.psychology.goal_policy(self.profile),
         )
         if was_running:
             self.cognitive_loop.start()
@@ -556,10 +657,14 @@ class DigitalChildAgent:
         return self.cognitive_loop.tick_once()
 
     def close(self) -> None:
-        self.cognitive_loop.stop()
-        self.repository.close()
+        self._closed.set()
+        with self._interaction_lock:
+            self.cognitive_loop.stop()
+            self.repository.close()
 
     def _record_suggested_goal(self, text: str, decision: str) -> Goal | None:
+        if decision == "refuse":
+            return None
         normalized = normalize_text(text)
         for goal in self.repository.list_goals(100, active_only=True):
             if normalize_text(goal.description) == normalized:
@@ -660,14 +765,17 @@ class DigitalChildAgent:
             "llm": health.model_dump(mode="json"),
             "cognitive_loop": self.cognitive_loop.status.model_dump(mode="json"),
             "needs": [item.model_dump(mode="json") for item in self.cognitive_loop.needs()],
-            "budgets": [item.model_dump(mode="json") for item in self.cognitive_loop.budgets.list()],
+            "budgets": [
+                item.model_dump(mode="json") for item in self.cognitive_loop.budgets.list()
+            ],
             "active_goal": self._active_goal_summary(),
             "active_goal_count": len(self.repository.list_goals(500, active_only=True)),
             "pending_cognitive_events": len(self.repository.pending_cognitive_events(500)),
             "conversation_messages": len(self.repository.recent_conversation("local-user", 500)),
+            "psychology": self.psychology.diagnostics(self.profile),
         }
 
-    def llm_health(self):
+    def llm_health(self) -> LLMHealth:
         return self.cognitive_backend.health_check()
 
     def _needs_summary(self) -> str:
@@ -685,6 +793,7 @@ class DigitalChildAgent:
 
     def _beliefs_summary(self) -> str:
         from digital_child.config import env_int
+
         beliefs = self.repository.list_beliefs(env_int("DIGITAL_CHILD_LLM_BELIEF_ITEMS", 4))
         if not beliefs:
             return "Собственных убеждений пока почти нет."
@@ -693,12 +802,14 @@ class DigitalChildAgent:
             for belief in beliefs
         )
 
-    def _memory_summary(self) -> str:
+    def _memory_summary(self, text: str = "", person_id: str = "local-user") -> str:
         from digital_child.config import env_int
-        episodes = self.repository.recent_episodes(env_int("DIGITAL_CHILD_LLM_MEMORY_ITEMS", 4))
-        if not episodes:
-            return "Личная история пока почти пуста."
-        return " | ".join(episode.content[:160] for episode in reversed(episodes))
+
+        return self.psychology.memory_summary(
+            text,
+            person_id,
+            env_int("DIGITAL_CHILD_LLM_MEMORY_ITEMS", 4),
+        )
 
     @staticmethod
     def _build_observation_response(
@@ -715,10 +826,7 @@ class DigitalChildAgent:
                     f"Я получил {gained_deu:.3f} DEU и обнаружил противоречие "
                     f"в {contested} убеждении(ях)."
                 )
-            return (
-                f"Я получил {gained_deu:.3f} DEU и обновил "
-                f"{len(updates)} убеждение(я)."
-            )
+            return f"Я получил {gained_deu:.3f} DEU и обновил {len(updates)} убеждение(я)."
         if (observation.novelty or 0.0) > 0.75:
             return f"Это новое для меня. Я усвоил {gained_deu:.3f} DEU опыта."
         if observation.integration > 0.70:

@@ -31,8 +31,8 @@ class DevelopmentStage(str, Enum):
     EXPLORER = "explorer"
     ADOLESCENT = "adolescent"
     MATURE = "mature"
-
-
+    EXPERIENCED = "experienced"
+    REFLECTIVE = "reflective"
 
 
 class NeedKind(str, Enum):
@@ -152,6 +152,12 @@ class EmotionName(str, Enum):
     LISTENING = "listening"
     SPEAKING = "speaking"
     WARY = "wary"
+    SAD = "sad"
+    FRUSTRATED = "frustrated"
+    ANXIOUS = "anxious"
+    PROUD = "proud"
+    AFFECTIONATE = "affectionate"
+    BORED = "bored"
 
 
 class ConversationRole(str, Enum):
@@ -526,6 +532,13 @@ class EmotionState(StrictModel):
     fatigue: Probability = 0.0
     social_need: Probability = 0.5
     dominant: EmotionName = EmotionName.NEUTRAL
+    frustration: Probability = 0.0
+    anxiety: Probability = 0.0
+    sadness: Probability = 0.0
+    affection: Probability = 0.0
+    pride: Probability = 0.0
+    boredom: Probability = 0.0
+    regulation: Probability = 0.15
 
 
 class ConversationMessage(StrictModel):
@@ -563,6 +576,7 @@ class DevelopmentTransition(StrictModel):
 
 
 class CycleResult(StrictModel):
+    episode_id: str | None = None
     calculated_novelty: Probability
     assessment: ExperienceAssessment
     transition: DevelopmentTransition

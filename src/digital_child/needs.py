@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import builtins
+import math
+
 from digital_child.models import CognitiveEvent, CognitiveEventKind, NeedKind, NeedState
+from digital_child.psychology_models import GoalBehaviorPolicy
 from digital_child.storage import SQLiteRepository
 
 
 def _clamp(value: float) -> float:
     return max(0.0, min(1.0, value))
+
+
+def _number(value: object, default: float = 0.0) -> float:
+    if not isinstance(value, (int, float, str)):
+        return default
+    try:
+        result = float(value)
+    except ValueError:
+        return default
+    return result if math.isfinite(result) else default
 
 
 _DEFAULTS: dict[NeedKind, tuple[float, float]] = {
@@ -43,9 +57,20 @@ class NeedEngine:
     def get(self, kind: NeedKind) -> NeedState:
         return self.states[kind]
 
-    def apply(self, event: CognitiveEvent) -> list[NeedState]:
+    def configure(self, policy: GoalBehaviorPolicy) -> None:
+        """Change personal baselines and sensitivity without manufacturing need or age."""
+        for kind, current in list(self.states.items()):
+            baseline = _clamp(policy.need_baselines.get(kind.value, current.baseline))
+            sensitivity = _clamp(policy.need_sensitivities.get(kind.value, current.sensitivity))
+            if abs(current.baseline - baseline) + abs(current.sensitivity - sensitivity) < 0.005:
+                continue
+            state = current.model_copy(update={"baseline": baseline, "sensitivity": sensitivity})
+            self.states[kind] = state
+            self.repository.save_need(state)
+
+    def apply(self, event: CognitiveEvent) -> builtins.list[NeedState]:
         deltas = self._deltas(event)
-        updated: list[NeedState] = []
+        updated: builtins.list[NeedState] = []
         for kind, delta in deltas.items():
             current = self.states[kind]
             value = _clamp(current.level + delta * current.sensitivity)
@@ -84,12 +109,14 @@ class NeedEngine:
                 NeedKind.CURIOSITY: 0.02,
             }
         if kind == CognitiveEventKind.INTERACTION:
-            novelty = float(payload.get("novelty", 0.4))
+            novelty = _clamp(_number(payload.get("novelty"), 0.4))
+            load = _clamp(_number(payload.get("psychological_load")))
+            boredom = _clamp(_number(payload.get("boredom")))
             return {
-                NeedKind.CURIOSITY: 0.04 * novelty,
+                NeedKind.CURIOSITY: 0.04 * novelty + 0.01 * boredom,
                 NeedKind.SOCIAL_CONNECTION: -0.07,
                 NeedKind.COMPETENCE: 0.01,
-                NeedKind.REST: 0.012,
+                NeedKind.REST: 0.012 + 0.03 * load,
             }
         if kind == CognitiveEventKind.CLAIM_RECEIVED:
             return {NeedKind.COHERENCE: 0.06, NeedKind.CURIOSITY: 0.03}
@@ -125,7 +152,8 @@ class NeedEngine:
                 NeedKind.CURIOSITY: -0.03,
             }
         if kind == CognitiveEventKind.REST:
-            return {NeedKind.REST: -0.55, NeedKind.PREDICTABILITY: -0.02}
+            amount = _clamp(_number(payload.get("amount"), 1.0))
+            return {NeedKind.REST: -0.55 * amount, NeedKind.PREDICTABILITY: -0.02 * amount}
         if kind == CognitiveEventKind.IDLE:
             return {
                 NeedKind.CURIOSITY: 0.008,

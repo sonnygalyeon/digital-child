@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import cast
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -15,26 +16,26 @@ from digital_child.models import (
     AgentState,
     AutonomyDecision,
     Belief,
+    CognitiveEvent,
+    CognitiveLoopStatus,
     ConsolidationReport,
+    ConversationMessage,
     CycleResult,
     DevelopmentProfile,
+    DriveSignal,
     EmotionState,
     Episode,
     EvidenceRecord,
     Goal,
     IdentityProfile,
     InteractionResult,
-    ConversationMessage,
-    CognitiveEvent,
-    CognitiveLoopStatus,
-    DriveSignal,
     LLMHealth,
     MemorySummary,
     NeedState,
     Observation,
-    ResourceBudget,
     RelationshipProfile,
     ResearchReport,
+    ResourceBudget,
     SourceRecord,
 )
 from digital_child.service import create_agent
@@ -68,12 +69,15 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     application = FastAPI(
         title="Digital Child API",
         version=__version__,
-        description="Event-driven needs, self-generated goals, bounded cognitive loop, memory and LLM integration.",
+        description=(
+            "Event-driven needs, developmental psychology, self-generated goals, "
+            "bounded cognitive loop, memory and LLM integration."
+        ),
         lifespan=lifespan,
     )
 
     def get_agent(request: Request) -> DigitalChildAgent:
-        return request.app.state.agent
+        return cast(DigitalChildAgent, request.app.state.agent)
 
     def require_operator(request: Request) -> None:
         expected = os.environ.get("DIGITAL_CHILD_OPERATOR_TOKEN", "").strip()
@@ -105,12 +109,19 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     def diagnostics(request: Request) -> dict[str, object]:
         return get_agent(request).diagnostics()
 
+    @application.get("/v1/psychology")
+    def psychology(request: Request) -> dict[str, object]:
+        agent = get_agent(request)
+        return agent.psychology.diagnostics(agent.profile)
+
     @application.get("/v1/llm", response_model=LLMHealth)
     def llm_health(request: Request) -> LLMHealth:
         return get_agent(request).llm_health()
 
     @application.get("/v1/conversation/{person_id}", response_model=list[ConversationMessage])
-    def conversation(person_id: str, request: Request, limit: int = 50) -> list[ConversationMessage]:
+    def conversation(
+        person_id: str, request: Request, limit: int = 50
+    ) -> list[ConversationMessage]:
         return get_agent(request).repository.recent_conversation(
             person_id,
             max(1, min(limit, 500)),
@@ -141,9 +152,7 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
 
     @application.get("/v1/background/events", response_model=list[CognitiveEvent])
     def background_events(request: Request, limit: int = 100) -> list[CognitiveEvent]:
-        return get_agent(request).repository.recent_cognitive_events(
-            max(1, min(limit, 500))
-        )
+        return get_agent(request).repository.recent_cognitive_events(max(1, min(limit, 500)))
 
     @application.get("/v1/background/budgets", response_model=list[ResourceBudget])
     def background_budgets(request: Request) -> list[ResourceBudget]:
@@ -182,9 +191,7 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
 
     @application.get("/v1/research", response_model=list[ResearchReport])
     def research_reports(request: Request, limit: int = 100) -> list[ResearchReport]:
-        return get_agent(request).repository.list_research_reports(
-            max(1, min(limit, 500))
-        )
+        return get_agent(request).repository.list_research_reports(max(1, min(limit, 500)))
 
     @application.post("/v1/observations", response_model=CycleResult)
     def add_observation(observation: Observation, request: Request) -> CycleResult:

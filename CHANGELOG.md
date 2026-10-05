@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased — developmental psychology and desktop sphere
+
+- Persistent subject-specific temperament, slowly adapting character and personal values.
+- Seven experience-driven developmental stages with smooth behavioral transitions.
+- Situation appraisal, contextual emotional memories, interests and per-person relationship repair.
+- Motivational decision scoring, commitment inertia, coping strategies and stable response styles.
+- Habit biases and reinforcement from attributed research outcomes and actual rest relief.
+- Individual goal weights, need sensitivity and goal switching thresholds.
+- Mood and self-model dynamics; frustration, anxiety, sadness, affection, pride and boredom.
+- Psychological context in LLM replies and relevant autobiographical memory selection.
+- Personality panel, expanded emotional sphere dynamics, CLI commands and psychology API.
+- Serialized interactions and background outcome attribution across resets and shutdown.
+- No tests added or executed for the developmental psychology work at the user's request.
+- Clean-Windows bootstrap with interactive application and model directories, verified portable
+  uv/Ollama downloads, managed Python, Qt, model setup and a server-aware desktop shortcut.
+- Local model launcher restores the selected model directory after reboot and uses an isolated port.
+
+- Native PySide6 chat with the emotional visualization in the same window.
+- Seven translucent sphere shells with smooth, state-driven movement and light.
+- Separate spawned agent process, streaming tokens and persistent conversation history.
+- Emotion and need meters, goal display, cognitive loop controls and rest.
+- Windows GUI entry point, setup script and desktop shortcut without a console.
+- Existing terminal companion window now uses the same sphere renderer.
+- Architecture review and Windows migration instructions.
+
 ## 0.5.0
 
 - Added event-driven need states independent of wall-clock age.

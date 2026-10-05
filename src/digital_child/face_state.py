@@ -19,6 +19,10 @@ class FaceState:
     fatigue: float = 0.0
     speaking_level: float = 0.0
     status_text: str = "IDLE"
+    frustration: float = 0.0
+    anxiety: float = 0.0
+    boredom: float = 0.0
+    regulation: float = 0.15
 
     @classmethod
     def from_emotion(
@@ -43,6 +47,10 @@ class FaceState:
             fatigue=emotion.fatigue,
             speaking_level=max(0.0, min(1.0, speaking_level)),
             status_text=status_text or process.upper(),
+            frustration=emotion.frustration,
+            anxiety=emotion.anxiety,
+            boredom=emotion.boredom,
+            regulation=emotion.regulation,
         )
 
     def to_message(self) -> dict[str, Any]:

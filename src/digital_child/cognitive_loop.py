@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import threading
-from datetime import UTC, datetime
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 from digital_child.budgets import BudgetManager
 from digital_child.drives import DriveEngine
@@ -16,8 +16,10 @@ from digital_child.models import (
     Goal,
     GoalOrigin,
     GoalStatus,
+    NeedState,
 )
 from digital_child.needs import NeedEngine
+from digital_child.psychology_models import GoalBehaviorPolicy
 from digital_child.storage import SQLiteRepository
 
 
@@ -30,6 +32,7 @@ class CognitiveLoop:
         *,
         notifier: Callable[[str], None] | None = None,
         heartbeat_seconds: float = 5.0,
+        behavior_policy_getter: Callable[[], GoalBehaviorPolicy] | None = None,
     ) -> None:
         self.repository = repository
         self.need_engine = NeedEngine(repository)
@@ -38,6 +41,7 @@ class CognitiveLoop:
         self.budgets = BudgetManager(repository)
         self.bus = CognitiveEventBus()
         self.notifier = notifier
+        self.behavior_policy_getter = behavior_policy_getter
         self.heartbeat_seconds = max(0.1, heartbeat_seconds)
         self.status = repository.load_cognitive_loop_status() or CognitiveLoopStatus()
         self._thread: threading.Thread | None = None
@@ -106,6 +110,9 @@ class CognitiveLoop:
         if event is None:
             event = CognitiveEvent(kind=CognitiveEventKind.IDLE, source="heartbeat")
             event = self.repository.save_cognitive_event(event)
+        policy = None if self.behavior_policy_getter is None else self.behavior_policy_getter()
+        if policy is not None:
+            self.need_engine.configure(policy)
         self.need_engine.apply(event)
         self.repository.mark_cognitive_event_processed(event.id)
         drives = self.drive_engine.evaluate(self.need_engine.list())
@@ -116,6 +123,8 @@ class CognitiveLoop:
             active,
             self.need_engine.list(),
             self.repository.current_sequence(),
+            policy=policy,
+            previous_goal_id=self.status.active_goal_id,
         )
         if arbitration.selected_goal is not None:
             self.repository.save_goal(arbitration.selected_goal)
@@ -137,7 +146,7 @@ class CognitiveLoop:
         self._persist()
         return self.status
 
-    def needs(self):
+    def needs(self) -> list[NeedState]:
         return self.need_engine.list()
 
     def drives(self) -> list[DriveSignal]:

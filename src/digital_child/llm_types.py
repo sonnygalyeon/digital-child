@@ -29,3 +29,8 @@ class ReplyContext:
     total_deu: float
     needs_summary: str = "нет данных"
     active_goal_summary: str = "нет выбранной цели"
+    psychology_summary: str = "индивидуальные особенности ещё формируются"
+    development_summary: str = "нет данных"
+    behavior_guidance: tuple[str, ...] = ()
+    behavior_style: str = "direct"
+    coping_strategy: str = "respond"

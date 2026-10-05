@@ -11,11 +11,10 @@ from digital_child.models import (
     AuditEvent,
     AutonomyDecision,
     Belief,
+    CognitiveEvent,
+    CognitiveLoopStatus,
     ConversationMessage,
     ConversationRole,
-    CognitiveEvent,
-    CognitiveEventKind,
-    CognitiveLoopStatus,
     DevelopmentProfile,
     EmotionState,
     Episode,
@@ -24,15 +23,15 @@ from digital_child.models import (
     Goal,
     IdentityProfile,
     MemorySummary,
-    NeedKind,
     NeedState,
-    ResourceBudget,
     RelationshipProfile,
     ResearchReport,
+    ResourceBudget,
     SourceKind,
     SourceRecord,
     TrustEvent,
 )
+from digital_child.psychology_models import PsychologyState
 
 
 class SQLiteRepository:
@@ -292,7 +291,14 @@ class SQLiteRepository:
                 )
                 """
             )
-
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS psychology_state (
+                    singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+                    state_json TEXT NOT NULL
+                )
+                """
+            )
 
     def _ensure_snapshot_columns(self) -> None:
         columns = {
@@ -304,9 +310,7 @@ class SQLiteRepository:
             )
 
     def _ensure_episode_columns(self) -> None:
-        columns = {
-            row["name"] for row in self.connection.execute("PRAGMA table_info(episodes)")
-        }
+        columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(episodes)")}
         definitions = {
             "sequence": "INTEGER NOT NULL DEFAULT 0",
             "normalized_content": "TEXT NOT NULL DEFAULT ''",
@@ -316,9 +320,7 @@ class SQLiteRepository:
         }
         for name, definition in definitions.items():
             if name not in columns:
-                self.connection.execute(
-                    f"ALTER TABLE episodes ADD COLUMN {name} {definition}"
-                )
+                self.connection.execute(f"ALTER TABLE episodes ADD COLUMN {name} {definition}")
 
     def current_sequence(self) -> int:
         with self._lock:
@@ -360,6 +362,14 @@ class SQLiteRepository:
                 ),
             )
         return stored
+
+    def get_episode(self, episode_id: str) -> Episode | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT * FROM episodes WHERE id = ?",
+                (episode_id,),
+            ).fetchone()
+        return None if row is None else self._episode_from_row(row)
 
     def recent_episodes(self, limit: int = 20, include_archived: bool = False) -> list[Episode]:
         if limit <= 0:
@@ -661,7 +671,9 @@ class SQLiteRepository:
                     (group["normalized_content"],),
                 ).fetchone()
                 summary = MemorySummary(
-                    id=existing["id"] if existing else MemorySummary(
+                    id=existing["id"]
+                    if existing
+                    else MemorySummary(
                         normalized_key=group["normalized_content"],
                         representative_text=representative,
                         episode_count=group["count"],
@@ -721,7 +733,6 @@ class SQLiteRepository:
                 (limit,),
             ).fetchall()
         return [MemorySummary.model_validate(dict(row)) for row in rows]
-
 
     def get_or_create_person_source(
         self,
@@ -835,8 +846,10 @@ class SQLiteRepository:
                 "SELECT relationship_json FROM relationships WHERE person_id = ?",
                 (person_id,),
             ).fetchone()
-        return None if row is None else RelationshipProfile.model_validate_json(
-            row["relationship_json"]
+        return (
+            None
+            if row is None
+            else RelationshipProfile.model_validate_json(row["relationship_json"])
         )
 
     def save_trust_event(self, event: TrustEvent) -> None:
@@ -1097,9 +1110,7 @@ class SQLiteRepository:
             row = self.connection.execute(
                 "SELECT status_json FROM cognitive_loop_state WHERE singleton_id = 1"
             ).fetchone()
-        return None if row is None else CognitiveLoopStatus.model_validate_json(
-            row["status_json"]
-        )
+        return None if row is None else CognitiveLoopStatus.model_validate_json(row["status_json"])
 
     def save_budget(self, budget: ResourceBudget) -> None:
         with self._lock, self.connection:
@@ -1123,6 +1134,23 @@ class SQLiteRepository:
                 (name, window_key),
             ).fetchone()
         return None if row is None else ResourceBudget.model_validate_json(row["budget_json"])
+
+    def save_psychology(self, state: PsychologyState) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO psychology_state (singleton_id, state_json) VALUES (1, ?)
+                ON CONFLICT(singleton_id) DO UPDATE SET state_json = excluded.state_json
+                """,
+                (state.model_dump_json(),),
+            )
+
+    def load_psychology(self) -> PsychologyState | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT state_json FROM psychology_state WHERE singleton_id = 1"
+            ).fetchone()
+        return None if row is None else PsychologyState.model_validate_json(row["state_json"])
 
     def save_snapshot(self, snapshot: AgentSnapshot) -> None:
         with self._lock, self.connection:
@@ -1167,6 +1195,7 @@ class SQLiteRepository:
     def reset(self) -> None:
         with self._lock, self.connection:
             for table in (
+                "psychology_state",
                 "resource_budgets",
                 "cognitive_loop_state",
                 "cognitive_events",
