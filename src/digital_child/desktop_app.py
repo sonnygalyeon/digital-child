@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import json
 import multiprocessing
 import os
 import time
 from dataclasses import replace
+from html import escape
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QByteArray, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QFont, QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
+    QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -21,8 +27,12 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QSplitter,
     QTabWidget,
+    QTextBrowser,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -184,6 +194,9 @@ class DesktopWindow(QMainWindow):
         self.face = FaceState()
         self.reply: MessageCard | None = None
         self._history_ids: set[str] = set()
+        self._preferences_person: str | None = None
+        self._preferences_dirty = False
+        self._loading_preferences = False
         self.loop_running = False
         self.loop_paused = False
         self.settings = QSettings("DigitalChild", "Desktop")
@@ -290,10 +303,78 @@ class DesktopWindow(QMainWindow):
         interests_layout.addWidget(self.interests_label)
         self.initiative_label = _label("", "muted", wrap=True)
         interests_layout.addWidget(self.initiative_label)
-        self.connection_label = _label("", "muted", wrap=True)
-        interests_layout.addWidget(self.connection_label)
+        self.time_status_label = _label("", "muted", wrap=True)
+        interests_layout.addWidget(self.time_status_label)
         interests_layout.addStretch()
         tabs.addTab(interests_panel, "Интересы")
+        preferences_panel = QWidget()
+        preferences_layout = QFormLayout(preferences_panel)
+        self.preferences_initiative = QCheckBox("Может писать первым")
+        preferences_layout.addRow(self.preferences_initiative)
+        self.preferences_frequency = QComboBox()
+        for label, value in (("Редко", "low"), ("Обычно", "normal"), ("Чаще", "high")):
+            self.preferences_frequency.addItem(label, value)
+        preferences_layout.addRow("Инициатива", self.preferences_frequency)
+        self.preferences_length = QComboBox()
+        for label, value in (("Кратко", "short"), ("Обычно", "normal"), ("Подробно", "detailed")):
+            self.preferences_length.addItem(label, value)
+        preferences_layout.addRow("Ответы", self.preferences_length)
+        self.preferences_quiet = QCheckBox("Соблюдать время тишины")
+        preferences_layout.addRow(self.preferences_quiet)
+        self.preferences_start, self.preferences_end = QSpinBox(), QSpinBox()
+        for control in (self.preferences_start, self.preferences_end):
+            control.setRange(0, 23)
+            control.setSuffix(":00")
+        preferences_layout.addRow("Тишина с", self.preferences_start)
+        preferences_layout.addRow("До", self.preferences_end)
+        self.preferences_offset = QSpinBox()
+        self.preferences_offset.setRange(-720, 840)
+        self.preferences_offset.setSingleStep(30)
+        self.preferences_offset.setSuffix(" мин")
+        self.preferences_offset.setToolTip("Смещение местного времени от UTC. Москва: 180 минут.")
+        preferences_layout.addRow("Часовой пояс UTC +", self.preferences_offset)
+        self.preferences_topics = QPlainTextEdit()
+        self.preferences_topics.setPlaceholderText(
+            "Темы, которые не стоит предлагать: по одной в строке"
+        )
+        self.preferences_topics.setMaximumHeight(90)
+        preferences_layout.addRow(self.preferences_topics)
+        self.preferences_save = QPushButton("Сохранить общение")
+        self.preferences_save.clicked.connect(self._save_preferences)
+        for checkbox in (self.preferences_initiative, self.preferences_quiet):
+            checkbox.toggled.connect(self._mark_preferences_dirty)
+        for combo in (self.preferences_frequency, self.preferences_length):
+            combo.currentIndexChanged.connect(self._mark_preferences_dirty)
+        for spin in (self.preferences_start, self.preferences_end, self.preferences_offset):
+            spin.valueChanged.connect(self._mark_preferences_dirty)
+        self.preferences_topics.textChanged.connect(self._mark_preferences_dirty)
+        preferences_layout.addRow(self.preferences_save)
+        preferences_scroll = QScrollArea()
+        preferences_scroll.setWidgetResizable(True)
+        preferences_scroll.setWidget(preferences_panel)
+        tabs.addTab(preferences_scroll, "Общение")
+        development_panel = QWidget()
+        development_layout = QVBoxLayout(development_panel)
+        self.skills_label = _label(
+            "Оценки навыков появятся после наблюдаемых попыток.", "muted", wrap=True
+        )
+        development_layout.addWidget(self.skills_label)
+        self.curriculum_label = _label("", "muted", wrap=True)
+        development_layout.addWidget(self.curriculum_label)
+        self.timeline_tree = QTreeWidget()
+        self.timeline_tree.setHeaderLabels(["Событие (UTC) / изменение", "Результат"])
+        self.timeline_tree.setColumnWidth(0, 230)
+        self.timeline_tree.itemSelectionChanged.connect(self._select_timeline)
+        development_layout.addWidget(self.timeline_tree, 2)
+        self.timeline_detail = QTextBrowser()
+        self.timeline_detail.setOpenExternalLinks(True)
+        self.timeline_detail.setPlaceholderText(
+            "Выберите событие, чтобы увидеть исходные эпизоды и источники."
+        )
+        development_layout.addWidget(self.timeline_detail, 1)
+        self._timeline_signature: tuple[str, ...] = ()
+        self._selected_event: str | None = None
+        tabs.addTab(development_panel, "Развитие")
         layout.addWidget(tabs)
         self.goal_label = _label("Текущая цель появится после загрузки", "muted", wrap=True)
         self.goal_label.setMaximumHeight(54)
@@ -432,6 +513,68 @@ class DesktopWindow(QMainWindow):
         self.activity_label.setText("Агент обдумывает сообщение…")
         self._update_controls()
 
+    def _save_preferences(self) -> None:
+        if not self.ready or self.busy or self.closing:
+            return
+        patch = {
+            "initiative_enabled": self.preferences_initiative.isChecked(),
+            "frequency": self.preferences_frequency.currentData(),
+            "reply_length": self.preferences_length.currentData(),
+            "quiet_enabled": self.preferences_quiet.isChecked(),
+            "quiet_start": self.preferences_start.value(),
+            "quiet_end": self.preferences_end.value(),
+            "utc_offset_minutes": self.preferences_offset.value(),
+            "blocked_topics": self.preferences_topics.toPlainText().splitlines(),
+        }
+        self._send({"type": "preferences", "patch": patch})
+
+    def _mark_preferences_dirty(self) -> None:
+        if not self._loading_preferences:
+            self._preferences_dirty = True
+
+    def _select_timeline(self) -> None:
+        selected = self.timeline_tree.selectedItems()
+        if not selected:
+            return
+        event_id = selected[0].data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(event_id, str) and event_id != self._selected_event:
+            self._selected_event = event_id
+            self._send({"type": "timeline_detail", "event_id": event_id})
+
+    def _apply_timeline(self, events: list[dict[str, Any]]) -> None:
+        signature = tuple(item["id"] for item in events)
+        if signature == self._timeline_signature:
+            return
+        self._timeline_signature = signature
+        expanded = {
+            item.data(0, Qt.ItemDataRole.UserRole)
+            for index in range(self.timeline_tree.topLevelItemCount())
+            if (item := self.timeline_tree.topLevelItem(index)) is not None and item.isExpanded()
+        }
+        self.timeline_tree.blockSignals(True)
+        self.timeline_tree.clear()
+        for event in events:
+            event_id = event["id"]
+            root = QTreeWidgetItem([event["created_at"][:19].replace("T", " "), event["title"]])
+            root.setToolTip(1, event["title"])
+            root.setData(0, Qt.ItemDataRole.UserRole, event_id)
+            self.timeline_tree.addTopLevelItem(root)
+            for name, change in event.get("changes", {}).items():
+                child = QTreeWidgetItem([name, f"{change.get('before')} → {change.get('after')}"])
+                child.setData(0, Qt.ItemDataRole.UserRole, event_id)
+                root.addChild(child)
+            for episode_id in event.get("episode_ids", []):
+                child = QTreeWidgetItem(["Исходный эпизод", episode_id])
+                child.setData(0, Qt.ItemDataRole.UserRole, event_id)
+                root.addChild(child)
+            root.setExpanded(event_id in expanded)
+            if event_id == self._selected_event:
+                root.setSelected(True)
+        self.timeline_tree.blockSignals(False)
+        if self._selected_event and self._selected_event not in signature:
+            self._selected_event = None
+            self.timeline_detail.clear()
+
     def _send(self, message: dict[str, Any]) -> bool:
         try:
             if self.connection is None:
@@ -488,6 +631,45 @@ class DesktopWindow(QMainWindow):
             self.connection_label.setToolTip(health.get("detail", ""))
         elif kind == "snapshot":
             self._apply_snapshot(message["snapshot"])
+        elif kind == "timeline_detail":
+            event = message["event"]
+            if event["id"] != self._selected_event:
+                return
+            html = "<b>" + escape(event["title"]) + "</b>"
+            for episode in message.get("episodes", []):
+                html += (
+                    f"<p><b>Эпизод {episode['sequence']}</b> "
+                    + escape(episode["id"])
+                    + "</p><pre>"
+                    + escape(episode["content"])
+                    + "</pre><p>Исход: "
+                    + escape(episode["outcome"])
+                    + "</p>"
+                )
+            for source in event.get("evidence", []):
+                url = source.get("url", "")
+                if urlsplit(url).scheme in {"http", "https"}:
+                    html += (
+                        f'<p><a href="{escape(url, quote=True)}">'
+                        + escape(source.get("title", url))
+                        + "</a><br>"
+                        + escape(source.get("excerpt", ""))
+                        + "</p>"
+                    )
+            if message.get("related"):
+                html += (
+                    "<p><b>Связанные записи (текущее состояние)</b></p><pre>"
+                    + escape(json.dumps(message["related"], ensure_ascii=False, indent=2))
+                    + "</pre>"
+                )
+            if not message.get("episodes") and not event.get("evidence"):
+                html += "<p>Это событие не связано с внешним наблюдением.</p>"
+            self.timeline_detail.setHtml(html)
+        elif kind == "preferences_saved":
+            self._preferences_person = None
+            self._preferences_dirty = False
+            self._apply_snapshot(message["snapshot"])
+            self._notice("Настройки общения сохранены для текущего собеседника.")
         elif kind == "token":
             follow = self._near_bottom()
             if self.reply is not None:
@@ -543,6 +725,39 @@ class DesktopWindow(QMainWindow):
         self._add_card(card)
 
     def _apply_snapshot(self, snapshot: dict[str, Any]) -> None:
+        self._apply_timeline(snapshot.get("timeline", []))
+        skills = snapshot.get("competence", [])
+        self.skills_label.setText(
+            "\n".join(
+                f"{item['skill']}: успех {item['confidence']:.0%}, попыток {item['samples']}"
+                for item in skills[:6]
+            )
+            or "Оценки навыков появятся после наблюдаемых попыток."
+        )
+        curriculum = snapshot.get("curriculum", [])
+        self.curriculum_label.setText(
+            "Следующий опыт: " + curriculum[0]["reason"]
+            if curriculum
+            else "Текущая программа закрытых экспериментов завершена."
+        )
+        person_id = snapshot.get("person_id", "local-user")
+        if self._preferences_person != person_id or not self._preferences_dirty:
+            self._loading_preferences = True
+            preferences = snapshot.get("communication", {})
+            self.preferences_initiative.setChecked(preferences.get("initiative_enabled", True))
+            self.preferences_quiet.setChecked(preferences.get("quiet_enabled", False))
+            self.preferences_start.setValue(preferences.get("quiet_start", 22))
+            self.preferences_end.setValue(preferences.get("quiet_end", 8))
+            self.preferences_offset.setValue(preferences.get("utc_offset_minutes", 0))
+            self.preferences_frequency.setCurrentIndex(
+                self.preferences_frequency.findData(preferences.get("frequency", "normal"))
+            )
+            self.preferences_length.setCurrentIndex(
+                self.preferences_length.findData(preferences.get("reply_length", "normal"))
+            )
+            self.preferences_topics.setPlainText("\n".join(preferences.get("blocked_topics", [])))
+            self._preferences_person = person_id
+            self._loading_preferences = False
         self.face = FaceState.from_payload(snapshot["face"])
         self.name_label.setText(snapshot["name"])
         self.stage_label.setText(
@@ -566,7 +781,7 @@ class DesktopWindow(QMainWindow):
             if clock.get("source") == "https_date" and not clock.get("error")
             else "Время по локальным часам с последней известной поправкой"
         )
-        self.connection_label.setText(
+        self.time_status_label.setText(
             f"{time_label}.\nОжидают проверки: {snapshot.get('pending_verifications', 0)}."
         )
         personality = dict(psychology.get("character", {}))
@@ -619,6 +834,7 @@ class DesktopWindow(QMainWindow):
         self._update_controls()
 
     def _update_controls(self) -> None:
+        self.preferences_save.setEnabled(self.ready and not self.busy and not self.closing)
         available = self.ready and not self.busy and not self.closing
         self.send_button.setEnabled(available and bool(self.input.toPlainText().strip()))
         for button in self.action_buttons:

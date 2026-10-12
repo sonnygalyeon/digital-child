@@ -15,6 +15,10 @@ class BudgetManager:
         "background_cycles": ("DIGITAL_CHILD_MAX_BACKGROUND_CYCLES_PER_DAY", 10_000),
         "initiative_messages": ("DIGITAL_CHILD_MAX_INITIATIVE_MESSAGES_PER_DAY", 5),
         "deferred_checks": ("DIGITAL_CHILD_MAX_DEFERRED_CHECKS_PER_DAY", 8),
+        "experiments": ("DIGITAL_CHILD_MAX_EXPERIMENTS_PER_DAY", 8),
+        "autonomous_experiments": ("DIGITAL_CHILD_MAX_AUTO_EXPERIMENTS_PER_DAY", 2),
+        "memory_analysis": ("DIGITAL_CHILD_MAX_MEMORY_ANALYSES_PER_DAY", 20),
+        "regulated_rest": ("DIGITAL_CHILD_MAX_REGULATED_RESTS_PER_DAY", 4),
     }
 
     def __init__(
@@ -35,7 +39,17 @@ class BudgetManager:
     def _get(self, name: str) -> ResourceBudget:
         env_name, default = self.DEFAULTS[name]
         limit = max(
-            0 if name in {"initiative_messages", "deferred_checks"} else 1,
+            0
+            if name
+            in {
+                "initiative_messages",
+                "deferred_checks",
+                "experiments",
+                "autonomous_experiments",
+                "memory_analysis",
+                "regulated_rest",
+            }
+            else 1,
             env_int(env_name, default),
         )
         key = self.window_key() if self._now is None else self._now().date().isoformat()

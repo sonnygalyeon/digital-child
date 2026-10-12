@@ -237,6 +237,13 @@ class SQLiteRepository:
                 )"""
             )
             self.connection.execute(
+                """CREATE TABLE IF NOT EXISTS feature_records (
+                    kind TEXT NOT NULL, id TEXT NOT NULL, subject_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    payload_json TEXT NOT NULL, PRIMARY KEY(kind, id)
+                )"""
+            )
+            self.connection.execute(
                 """CREATE TABLE IF NOT EXISTS deferred_verifications (
                     id TEXT PRIMARY KEY, source_message_id TEXT UNIQUE NOT NULL,
                     completed INTEGER NOT NULL, notified INTEGER NOT NULL,
@@ -1044,6 +1051,35 @@ class SQLiteRepository:
             ).fetchone()
         return {} if row is None else dict(json.loads(row["payload_json"]))
 
+    def save_feature(
+        self, kind: str, record_id: str, subject_id: str, payload: dict[str, object]
+    ) -> None:
+        with self.transaction():
+            self.connection.execute(
+                """INSERT INTO feature_records (kind, id, subject_id, payload_json)
+                VALUES (?, ?, ?, ?) ON CONFLICT(kind, id) DO UPDATE SET
+                subject_id = excluded.subject_id, payload_json = excluded.payload_json""",
+                (kind, record_id, subject_id, json.dumps(payload, ensure_ascii=False)),
+            )
+
+    def load_feature(self, kind: str, record_id: str, subject_id: str) -> dict[str, object] | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT payload_json FROM feature_records WHERE kind = ? AND id = ? "
+                "AND subject_id = ?",
+                (kind, record_id, subject_id),
+            ).fetchone()
+        return None if row is None else dict(json.loads(row["payload_json"]))
+
+    def list_features(self, kind: str, subject_id: str, limit: int = 20) -> list[dict[str, object]]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT payload_json FROM feature_records WHERE kind = ? AND subject_id = ? "
+                "ORDER BY rowid DESC LIMIT ?",
+                (kind, subject_id, max(1, min(limit, 500))),
+            ).fetchall()
+        return [dict(json.loads(row["payload_json"])) for row in rows]
+
     def save_runtime_state(self, name: str, payload: dict[str, object]) -> None:
         with self.transaction():
             self.connection.execute(
@@ -1382,6 +1418,7 @@ class SQLiteRepository:
     def reset(self) -> None:
         with self.transaction():
             for table in (
+                "feature_records",
                 "deferred_verifications",
                 "psychology_state",
                 "resource_budgets",

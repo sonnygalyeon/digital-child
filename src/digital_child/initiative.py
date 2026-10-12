@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+from digital_child.communication import CommunicationPreferences
 from digital_child.config import env_bool, env_float, env_int
 from digital_child.interest_catalog import (
     DISCUSSION_GUIDANCE,
@@ -71,6 +72,7 @@ class InitiativePlanner:
         now: datetime,
         settings: InitiativeSettings,
         energy: float,
+        preferences: dict[str, CommunicationPreferences] | None = None,
     ) -> InitiativePlan | None:
         if not settings.enabled or not state.initiative_enabled or energy < 0.12:
             return None
@@ -80,6 +82,12 @@ class InitiativePlanner:
         orientation = discussion_orientation(state, profile)
         candidates: list[InitiativePlan] = []
         for source in latest_inputs:
+            preference = None if preferences is None else preferences.get(source.person_id)
+            if preference is not None and (
+                not preference.initiative_enabled or preference.quiet(now)
+            ):
+                continue
+            cooldown = settings.cooldown * (1 if preference is None else preference.cooldown_scale)
             social = state.relationships.get(source.person_id)
             if social is None or not social.initiative_allowed:
                 continue
@@ -90,17 +98,22 @@ class InitiativePlanner:
             if social.conflict_load > 0.75 or social.felt_safety < 0.15:
                 continue
             if social.last_initiative_attempt_at is not None:
-                if elapsed_seconds(now, social.last_initiative_attempt_at) < min(
-                    settings.cooldown, 300
-                ):
+                if elapsed_seconds(now, social.last_initiative_attempt_at) < min(cooldown, 300):
                     continue
             if social.last_initiative_at is not None:
-                if elapsed_seconds(now, social.last_initiative_at) < settings.cooldown:
+                if elapsed_seconds(now, social.last_initiative_at) < cooldown:
                     continue
             silence = elapsed_seconds(now, source.created_at)
+            allowed = [
+                item
+                for item in choices
+                if preference is None or preference.allows_topic(item.topic, now)
+            ]
+            if not allowed:
+                continue
             interest = next(
-                (item for item in choices if item.topic not in social.recent_initiative_topics),
-                choices[0],
+                (item for item in allowed if item.topic not in social.recent_initiative_topics),
+                allowed[0],
             )
             common = (
                 "Напиши короткую самостоятельную реплику из 1–3 предложений.",
@@ -140,6 +153,7 @@ class InitiativePlanner:
             if (
                 settings.discussion_delay <= silence <= 6 * 3600
                 and social.last_discussion_message_id != source.id
+                and (preference is None or preference.allows_topic(source.content, now))
                 and source.intent
                 in {
                     MessageIntent.OPINION,

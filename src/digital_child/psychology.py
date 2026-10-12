@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from digital_child.appraisal import appraise_situation, clamp, overlap, situation_cue, topic_tokens
 from digital_child.behavior import choose_behavior
 from digital_child.behavioral_development import developmental_dynamics
+from digital_child.experiments import ExperimentTrial
 from digital_child.initiative import InitiativePlan, elapsed_seconds, utc
 from digital_child.interest_catalog import (
     THEMES,
@@ -127,7 +128,9 @@ class PsychologyEngine:
                 self.state.interests[theme.title] = interest
             interest.developmental_weight = weights[theme.title]
 
-    def sync_contacts(self, messages: list[ConversationMessage]) -> None:
+    def sync_contacts(
+        self, messages: list[ConversationMessage], defaults: dict[str, bool] | None = None
+    ) -> None:
         with self._lock:
             changed = False
             for message in messages:
@@ -136,6 +139,9 @@ class PsychologyEngine:
                     relationship = self.repository.load_relationship(message.person_id)
                     social = SocialExperience(
                         person_id=message.person_id,
+                        initiative_allowed=True
+                        if defaults is None
+                        else defaults.get(message.person_id, True),
                         warmth=0.35 if relationship is None else relationship.affective_trust,
                     )
                     self.state.relationships[message.person_id] = social
@@ -252,6 +258,13 @@ class PsychologyEngine:
             self.state.initiative_enabled = enabled
             self._save()
 
+    def set_contact_initiative(self, person_id: str, enabled: bool) -> None:
+        with self._lock:
+            social = self.state.relationships.get(person_id)
+            if social is not None:
+                social.initiative_allowed = enabled
+                self._save()
+
     @staticmethod
     def _seed_value(seed: str, name: str) -> float:
         digest = hashlib.blake2b(f"{seed}:{name}".encode(), digest_size=8).digest()
@@ -271,6 +284,7 @@ class PsychologyEngine:
         novelty: float,
         energy: float,
         episode: Episode,
+        associated_episode_ids: list[str] | None = None,
     ) -> BehaviorEvaluation:
         with self._lock:
             development = developmental_dynamics(profile)
@@ -283,7 +297,9 @@ class PsychologyEngine:
                     felt_safety=0.3 + relationship.familiarity * 0.3,
                 )
             tokens = topic_tokens(analysis.text)
-            resonance, recalled_threat, recalled_ids = self._recall(tokens, relationship.person_id)
+            resonance, recalled_threat, recalled_ids = self._recall(
+                tokens, relationship.person_id, associated_episode_ids
+            )
             appraisal = appraise_situation(
                 analysis,
                 novelty=novelty,
@@ -315,6 +331,10 @@ class PsychologyEngine:
                 prior_decision=prior,
             )
             trace.recalled_episode_ids = recalled_ids
+            if trace.value_conflict:
+                self.state.value_conflicts = (self.state.value_conflicts + [trace.value_conflict])[
+                    -24:
+                ]
             before_warmth = social.warmth
             self._update_relationship(social, appraisal, development, episode.sequence)
             self.state.relationships[relationship.person_id] = social
@@ -346,11 +366,15 @@ class PsychologyEngine:
                 affective_trust_delta=max(-0.03, min(0.015, social.warmth - before_warmth)),
             )
 
-    def _recall(self, tokens: list[str], person_id: str) -> tuple[float, float, list[str]]:
+    def _recall(
+        self, tokens: list[str], person_id: str, associated_episode_ids: list[str] | None = None
+    ) -> tuple[float, float, list[str]]:
         selected = []
         current_sequence = self.repository.current_sequence()
         for memory in self.state.affective_memories:
             similarity = overlap(tokens, memory.tokens)
+            if memory.episode_id in (associated_episode_ids or []):
+                similarity = max(similarity, 0.45)
             same_person = memory.person_id == person_id
             if similarity < 0.10 and not same_person:
                 continue
@@ -745,6 +769,54 @@ class PsychologyEngine:
                 )
             self._save()
 
+    def integrate_experiment(self, trial: ExperimentTrial, profile: DevelopmentProfile) -> None:
+        with self._lock:
+            key = "experiment:" + trial.id
+            if key in self.state.processed_outcomes:
+                return
+            self.state.processed_outcomes.append(key)
+            dynamics = developmental_dynamics(profile)
+            target = 0.8 if trial.success else 0.3
+            self.state.self_model.efficacy = clamp(
+                self.state.self_model.efficacy + (target - self.state.self_model.efficacy) * 0.02
+            )
+            self.state.self_model.accumulated_prediction_error = clamp(
+                self.state.self_model.accumulated_prediction_error * 0.9
+                + min(1.0, trial.prediction_error) * 0.1
+            )
+            cue = "experiment:" + trial.kind
+            habit = next(
+                (
+                    item
+                    for item in self.state.habits
+                    if item.cue == cue and item.strategy == trial.action
+                ),
+                None,
+            )
+            if habit is None:
+                habit = LearnedHabit(cue=cue, strategy=trial.action)
+                self.state.habits.append(habit)
+            habit.expected_relief += (
+                (1.0 if trial.success else 0.0) - habit.expected_relief
+            ) * 0.15
+            habit.strength = clamp(habit.strength + (0.03 if trial.success else -0.02))
+            habit.reinforcements += 1
+            habit.last_sequence = self.repository.current_sequence()
+            for name in ("diligence", "persistence"):
+                current = getattr(self.state.character, name)
+                origin = getattr(self.state.temperament, name)
+                change = (0.8 - current) * dynamics.plasticity * (0.2 if trial.success else 0.05)
+                setattr(
+                    self.state.character,
+                    name,
+                    clamp(max(origin - 0.18, min(origin + 0.18, current + change))),
+                )
+            self.state.reflections.append(
+                f"Закрытый эксперимент {trial.kind}: прогноз {trial.predicted_after:g}, "
+                f"наблюдение {trial.actual_after}; модель направления уточнена по результату."
+            )
+            self._save()
+
     def _reinforce_outcome(
         self,
         actual_relief: float,
@@ -753,6 +825,19 @@ class PsychologyEngine:
     ) -> None:
         if trace is None:
             return
+        if trace.value_conflict:
+            names = trace.value_conflict.get("values", [])
+            for name in names if isinstance(names, list) else []:
+                if not isinstance(name, str) or name not in self.state.values:
+                    continue
+                origin = 0.4 + 0.3 * self._seed_value(self.state.seed, f"value:{name}")
+                current = self.state.values[name]
+                self.state.values[name] = clamp(
+                    max(
+                        origin - 0.15,
+                        min(origin + 0.15, current + (actual_relief - 0.5) * confidence * 0.002),
+                    )
+                )
         cue = situation_cue(trace.appraisal)
         for habit in self.state.habits:
             if habit.cue != cue or habit.strategy != trace.coping:
@@ -862,6 +947,7 @@ class PsychologyEngine:
                 "temperament": self.state.temperament.model_dump(mode="json"),
                 "character": self.state.character.model_dump(mode="json"),
                 "values": dict(self.state.values),
+                "value_conflicts": list(self.state.value_conflicts),
                 "mood": self.state.mood.model_dump(mode="json"),
                 "self_model": self.state.self_model.model_dump(mode="json"),
                 "development": developmental_dynamics(profile).model_dump(mode="json"),

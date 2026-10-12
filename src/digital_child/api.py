@@ -11,7 +11,10 @@ from pydantic import BaseModel, Field
 
 from digital_child import __version__
 from digital_child.agent import DigitalChildAgent
+from digital_child.autobiography import BiographyChapter
+from digital_child.communication import CommunicationPreferences
 from digital_child.developmental_age import psychological_age_equivalent
+from digital_child.experiments import Demonstration, ExperimentKind, ExperimentTrial
 from digital_child.models import (
     AgentState,
     AutonomyDecision,
@@ -46,10 +49,27 @@ class RestRequest(BaseModel):
     amount: float = Field(default=0.25, ge=0.0, le=1.0)
 
 
+class BiographyCorrection(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+
+
+class ExperimentRequest(BaseModel):
+    kind: ExperimentKind = "balance"
+
+
 class InteractionRequest(BaseModel):
     text: str = Field(min_length=1, max_length=50_000)
     person_id: str = Field(default="api-user", min_length=1, max_length=200)
     force_research: bool = False
+
+
+class PersonModelCorrection(BaseModel):
+    text: str = Field(min_length=1, max_length=1000)
+    clear_notes: bool = False
+
+
+class RegulationFeedback(BaseModel):
+    helpful: bool
 
 
 class StateResponse(BaseModel):
@@ -141,6 +161,136 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     @application.get("/v1/llm", response_model=LLMHealth)
     def llm_health(request: Request) -> LLMHealth:
         return get_agent(request).llm_health()
+
+    @application.get("/v1/communication/{person_id}", response_model=CommunicationPreferences)
+    def communication(person_id: str, request: Request) -> CommunicationPreferences:
+        return get_agent(request).communication.get(person_id)
+
+    @application.patch(
+        "/v1/communication/{person_id}",
+        dependencies=[Depends(require_operator)],
+        response_model=CommunicationPreferences,
+    )
+    def update_communication(
+        person_id: str, patch: CommunicationPreferences, request: Request
+    ) -> CommunicationPreferences:
+        try:
+            return get_agent(request).update_communication(
+                person_id, patch.model_dump(exclude_unset=True, exclude={"topic_snoozes"})
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @application.get("/v1/biography", response_model=list[BiographyChapter])
+    def biography(request: Request, limit: int = 20) -> list[BiographyChapter]:
+        return get_agent(request).autobiography.chapters(limit)
+
+    @application.get("/v1/biography/{chapter_id}/sources", response_model=list[Episode])
+    def biography_sources(chapter_id: str, request: Request) -> list[Episode]:
+        try:
+            return get_agent(request).autobiography.sources(chapter_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @application.post(
+        "/v1/biography/{chapter_id}/corrections",
+        dependencies=[Depends(require_operator)],
+        response_model=BiographyChapter,
+    )
+    def correct_biography(
+        chapter_id: str, correction: BiographyCorrection, request: Request
+    ) -> BiographyChapter:
+        agent = get_agent(request)
+        try:
+            with agent._interaction_lock:
+                return agent.autobiography.revise(chapter_id, correction.text)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @application.get("/v1/experiments", response_model=list[ExperimentTrial])
+    def experiments(request: Request, limit: int = 20) -> list[ExperimentTrial]:
+        return get_agent(request).experiments.history(limit)
+
+    @application.post(
+        "/v1/experiments", dependencies=[Depends(require_operator)], response_model=ExperimentTrial
+    )
+    def run_experiment(payload: ExperimentRequest, request: Request) -> ExperimentTrial:
+        try:
+            return get_agent(request).run_experiment(payload.kind)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.get("/v1/value-conflicts")
+    def conflicts(request: Request) -> list[dict[str, object]]:
+        return get_agent(request).psychology.snapshot().value_conflicts
+
+    @application.get("/v1/associations")
+    def associations(request: Request, query: str, person_id: str = "local-user") -> object:
+        agent = get_agent(request)
+        with agent._interaction_lock:
+            return agent.associative_memory.search(query[:10000], person_id)
+
+    @application.get("/v1/competence")
+    def competence(request: Request) -> object:
+        return get_agent(request).competence.diagnostics()
+
+    @application.get("/v1/curriculum")
+    def curriculum(request: Request) -> object:
+        return get_agent(request).learning_curriculum()
+
+    @application.get("/v1/demonstrations")
+    def demonstrations(request: Request) -> object:
+        return get_agent(request).experiments.demonstrations()
+
+    @application.post("/v1/demonstrations", dependencies=[Depends(require_operator)])
+    def demonstrate(payload: Demonstration, request: Request) -> object:
+        return get_agent(request).demonstrate(payload)
+
+    @application.get("/v1/person-model/{person_id}")
+    def person_model(person_id: str, request: Request) -> object:
+        return get_agent(request).interlocutors.get(person_id)
+
+    @application.patch("/v1/person-model/{person_id}", dependencies=[Depends(require_operator)])
+    def correct_person_model(
+        person_id: str, payload: PersonModelCorrection, request: Request
+    ) -> object:
+        try:
+            return get_agent(request).correct_interlocutor(
+                person_id, payload.text, clear_notes=payload.clear_notes
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @application.get("/v1/regulation")
+    def regulation(request: Request, person_id: str = "local-user") -> object:
+        return get_agent(request).regulation.history(person_id)
+
+    @application.post(
+        "/v1/regulation/{attempt_id}/feedback", dependencies=[Depends(require_operator)]
+    )
+    def regulation_feedback(
+        attempt_id: str, payload: RegulationFeedback, request: Request
+    ) -> object:
+        try:
+            return get_agent(request).regulation_feedback(attempt_id, payload.helpful)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @application.get("/v1/timeline")
+    def timeline(request: Request, person_id: str | None = None, limit: int = 50) -> object:
+        return get_agent(request).timeline.history(person_id, limit)
+
+    @application.get("/v1/timeline/{event_id}")
+    def timeline_detail(event_id: str, request: Request) -> object:
+        try:
+            event, episodes = get_agent(request).timeline.detail(event_id)
+            return {
+                "event": event,
+                "episodes": episodes,
+                "related": get_agent(request).timeline.related(event),
+            }
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @application.get("/v1/conversation/{person_id}", response_model=list[ConversationMessage])
     def conversation(

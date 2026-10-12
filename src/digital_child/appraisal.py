@@ -108,8 +108,18 @@ def appraise_situation(
     resonance: float,
     recalled_threat: float,
 ) -> SituationAppraisal:
-    text = analysis.text.lower().replace("ё", "е")
+    text = (analysis.pragmatic_text or analysis.text).lower().replace("ё", "е")
     signals = {name: _signal(text, name) for name in _SIGNALS}
+    if analysis.criticism_target == "idea":
+        signals["hostility"] *= 0.15
+        signals["criticism"] = max(signals["criticism"], 0.35)
+    elif analysis.criticism_target == "person" and analysis.interpretation_source == "semantic":
+        signals["hostility"] = max(signals["hostility"], 0.4)
+    if analysis.quoted_speech:
+        signals["hostility"] *= 0.2
+    if analysis.irony_probability >= 0.5:
+        signals["hostility"] *= 0.4
+        signals["support"] *= 0.4
     # A mention of aggression is a lexical cue, not a proven intention or diagnosis.
     quoted = bool(re.search(r"[«\"].*?(заткнись|идиот|тупой).*?[»\"]", text))
     if quoted or any(word in text for word in ("пример фразы", "он сказал", "она сказала")):
@@ -121,7 +131,11 @@ def appraise_situation(
         - 0.25 * signals["respect"]
     )
     complexity = clamp(len(text.split()) / 130 + text.count("?") * 0.10)
-    uncertainty = clamp((1 - analysis.confidence) * 0.5 + complexity * 0.3)
+    uncertainty = clamp(
+        (1 - analysis.confidence) * 0.5
+        + complexity * 0.3
+        + float(analysis.needs_clarification) * 0.25
+    )
     prediction_error = abs((1 - pressure - signals["hostility"] * 0.5) - social.expected_respect)
     reactance = clamp(
         pressure * (0.35 + development.autonomy * 0.4 + traits.assertiveness * 0.25)

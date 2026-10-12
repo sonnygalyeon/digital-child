@@ -113,6 +113,8 @@ class InitiativeRuntime:
             if self._cancelled(revision, stop):
                 return
             now = agent.clock.now()
+            agent.maybe_regulate()
+            agent.maybe_experiment()
             inputs = agent.repository.latest_user_messages()
             agent.psychology.sync_contacts(inputs)
             changed = agent.psychology.update_absence(agent.profile, now)
@@ -130,6 +132,10 @@ class InitiativeRuntime:
                     now=now,
                     settings=self.settings,
                     energy=agent.state.energy,
+                    preferences={
+                        source.person_id: agent.communication.get(source.person_id)
+                        for source in inputs
+                    },
                 )
             if (
                 plan is None
@@ -150,6 +156,9 @@ class InitiativeRuntime:
         response = (
             verification[2] if verification is not None else self._generate(context, revision, stop)
         )
+        response = agent.reply_guard.finalize(
+            RuleBasedBackend() if verification else agent.cognitive_backend, context, response
+        ).text
         if not response or self._cancelled(revision, stop):
             return
         if not agent._interaction_lock.acquire(blocking=False):
@@ -229,6 +238,13 @@ class InitiativeRuntime:
         now = agent.clock.now()
         sources = {item.person_id: item for item in inputs}
         for task in agent.repository.verification_notices():
+            preference = agent.communication.get(task.source.person_id)
+            if (
+                not preference.initiative_enabled
+                or preference.quiet(now)
+                or not preference.allows_topic(task.claim, now)
+            ):
+                continue
             social = state.relationships.get(task.source.person_id)
             source = sources.get(task.source.person_id)
             if social is None or source is None or not social.initiative_allowed:
@@ -245,7 +261,7 @@ class InitiativeRuntime:
                     < (
                         self.settings.reconnect_cooldown
                         if social.unanswered_initiatives
-                        else self.settings.cooldown
+                        else self.settings.cooldown * preference.cooldown_scale
                     )
                 )
             ):
@@ -284,6 +300,7 @@ class InitiativeRuntime:
     def _context(self, plan: InitiativePlan, history: list[ConversationMessage]) -> ReplyContext:
         agent = self.agent
         psyche = agent.psychology.snapshot()
+        preferences = agent.communication.get(plan.person_id)
         development = developmental_dynamics(agent.profile)
         interests = "; ".join(
             f"{item.topic}: {item.angle}" for item in preferred_interests(psyche, agent.profile, 5)
@@ -320,6 +337,11 @@ class InitiativeRuntime:
             initiative_source_text=plan.source.content,
             discussion_orientation=plan.orientation,
             interests_summary=interests,
+            biography_summary=agent.autobiography.summary(plan.person_id),
+            communication_guidance=f"Длина ответа: {preferences.reply_length}.",
+            max_reply_chars=preferences.reply_chars,
+            competence_guidance=agent.competence_guidance(plan.topic),
+            interlocutor_summary=agent.interlocutors.summary(plan.person_id, plan.topic),
         )
 
     def _generate(self, context: ReplyContext, revision: int, stop: threading.Event) -> str:

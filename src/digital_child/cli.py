@@ -12,6 +12,7 @@ import uvicorn
 
 from digital_child.console import configure_utf8_console
 from digital_child.developmental_age import psychological_age_equivalent
+from digital_child.experiments import EXPERIMENT_KINDS, Demonstration
 from digital_child.face_controller import FaceWindowController
 from digital_child.models import (
     ClaimEvidenceInput,
@@ -76,6 +77,26 @@ HELP_TEXT = """Команды:
   /initiative [on|off]           самостоятельные реплики и их состояние
   /time                         источник UTC и время предыдущего запуска
   /verifications                отложенные проверки фактов и их результаты
+  /experiment [balance|transfer] закрытый эксперимент; без аргумента — история
+  /experiment noise|conditional|reversal  среды с шумом, контекстом и сменой правил
+  /recall ТЕКСТ                  поиск связанного опыта по смыслу
+  /competence                    наблюдаемые навыки и уверенность в них
+  /curriculum                    пробелы и предлагаемые эксперименты
+  /teach JSON                    показать пример шага закрытой среды
+  /demonstrations                гипотезы из демонстраций и результаты проверок
+  /person-model                  сведения о текущем собеседнике
+  /person-model correct ТЕКСТ    поправить сведения о себе
+  /person-model clear ТЕКСТ      очистить сведения, сохранив новую поправку
+  /regulation                    применённые стратегии саморегуляции
+  /regulation feedback ID helpful|unhelpful  оценить стратегию
+  /timeline [ID]                 история развития или исходные данные события
+  /conflicts                    последние конфликты личных ценностей
+  /biography                    главы автобиографии со ссылками на эпизоды
+  /biography sources ID         исходные эпизоды главы
+  /biography correct ID ТЕКСТ   сохранить поправку к главе
+  /preferences                  настройки общения с текущим собеседником
+  /preferences JSON             изменить настройки общения
+  /feedback ТЕМА                не предлагать тему следующие 7 суток
   /events [N]                   последние внутренние события
   /pause                        приостановить внутренний цикл
   /resume                       возобновить внутренний цикл
@@ -113,6 +134,162 @@ class ChatCommandRouter:
         self.person_id = "local-user"
 
     def handle(self, text: str) -> str:
+        if text.startswith("/recall "):
+            with self.agent._interaction_lock:
+                return self.agent.associative_memory.summary(
+                    self.agent.associative_memory.search(text.split(maxsplit=1)[1], self.person_id)
+                )
+        if text == "/competence":
+            return json.dumps(self.agent.competence.diagnostics(), ensure_ascii=False, indent=2)
+        if text == "/curriculum":
+            return json.dumps(
+                [item.model_dump(mode="json") for item in self.agent.learning_curriculum()],
+                ensure_ascii=False,
+                indent=2,
+            )
+        if text.startswith("/teach "):
+            try:
+                payload = json.loads(text.split(maxsplit=1)[1])
+                example = Demonstration.model_validate(payload)
+                example.person_id = self.person_id
+                return self.agent.demonstrate(example).model_dump_json(indent=2)
+            except ValueError as exc:
+                return f"Пример не сохранён: {exc}"
+        if text == "/demonstrations":
+            return json.dumps(
+                [item.model_dump(mode="json") for item in self.agent.experiments.demonstrations()],
+                ensure_ascii=False,
+                indent=2,
+            )
+        if text == "/person-model":
+            return self.agent.interlocutors.get(self.person_id).model_dump_json(indent=2)
+        if text.startswith(("/person-model correct ", "/person-model clear ")):
+            try:
+                model = self.agent.correct_interlocutor(
+                    self.person_id,
+                    text.split(maxsplit=2)[2],
+                    clear_notes=text.startswith("/person-model clear "),
+                )
+                return json.dumps(model.model_dump(mode="json"), ensure_ascii=False, indent=2)
+            except ValueError as exc:
+                return str(exc)
+        if text == "/regulation":
+            return json.dumps(
+                [
+                    item.model_dump(mode="json")
+                    for item in self.agent.regulation.history(self.person_id)
+                ],
+                ensure_ascii=False,
+                indent=2,
+            )
+        if text.startswith("/regulation feedback "):
+            parts = text.split()
+            if len(parts) != 4 or parts[3] not in {"helpful", "unhelpful"}:
+                return "Используйте /regulation feedback ID helpful|unhelpful"
+            try:
+                regulation_result = self.agent.regulation_feedback(parts[2], parts[3] == "helpful")
+                return json.dumps(
+                    regulation_result.model_dump(mode="json"), ensure_ascii=False, indent=2
+                )
+            except ValueError as exc:
+                return str(exc)
+        if text == "/timeline":
+            return (
+                "\n".join(
+                    f"{item.id} {item.created_at.isoformat()} {item.title}"
+                    for item in self.agent.timeline.history(self.person_id)
+                )
+                or "Событий пока нет."
+            )
+        if text.startswith("/timeline "):
+            try:
+                timeline_event, episodes = self.agent.timeline.detail(text.split(maxsplit=1)[1])
+                return json.dumps(
+                    {
+                        "event": timeline_event.model_dump(mode="json"),
+                        "episodes": [item.model_dump(mode="json") for item in episodes],
+                        "related": self.agent.timeline.related(timeline_event),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            except ValueError as exc:
+                return str(exc)
+        if text == "/preferences":
+            return self.agent.communication.get(self.person_id).model_dump_json(indent=2)
+        if text.startswith("/preferences "):
+            try:
+                patch = json.loads(text.split(maxsplit=1)[1])
+                if not isinstance(patch, dict):
+                    raise ValueError("Ожидается JSON-объект")
+                return self.agent.update_communication(self.person_id, patch).model_dump_json(
+                    indent=2
+                )
+            except ValueError as exc:
+                return f"Не удалось изменить настройки: {exc}"
+        if text.startswith("/feedback "):
+            with self.agent._interaction_lock:
+                self.agent.initiative.invalidate()
+                self.agent.communication.snooze_topic(
+                    self.person_id, text.split(maxsplit=1)[1], self.agent.clock.now()
+                )
+            return "Не буду самостоятельно предлагать эту тему следующие 7 суток."
+        if text == "/experiment":
+            return json.dumps(
+                [item.model_dump(mode="json") for item in self.agent.experiments.history()],
+                ensure_ascii=False,
+                indent=2,
+            )
+        if text.startswith("/experiment "):
+            try:
+                name = text.split(maxsplit=1)[1]
+                if name not in EXPERIMENT_KINDS:
+                    return "Доступны: " + ", ".join(EXPERIMENT_KINDS)
+                return self.agent.run_experiment(name).model_dump_json(indent=2)
+            except ValueError as exc:
+                return str(exc)
+        if text == "/conflicts":
+            return json.dumps(
+                self.agent.psychology.snapshot().value_conflicts, ensure_ascii=False, indent=2
+            )
+        if text == "/biography":
+            chapters = self.agent.autobiography.chapters()
+            return (
+                "\n\n".join(
+                    f"{item.title}\n{item.summary}\n"
+                    + (
+                        f"Поправка собеседника: {item.revisions[-1]['text']}\n"
+                        if item.revisions
+                        else ""
+                    )
+                    + f"Источники: /biography sources {item.id}"
+                    for item in chapters
+                )
+                or "Главы личной истории ещё не сформировались."
+            )
+        if text.startswith("/biography sources "):
+            try:
+                return json.dumps(
+                    [
+                        item.model_dump(mode="json")
+                        for item in self.agent.autobiography.sources(text.split(maxsplit=2)[2])
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            except ValueError as exc:
+                return str(exc)
+        if text.startswith("/biography correct "):
+            parts = text.split(maxsplit=3)
+            if len(parts) != 4:
+                return "Используйте /biography correct ID ТЕКСТ"
+            try:
+                with self.agent._interaction_lock:
+                    return self.agent.autobiography.revise(parts[2], parts[3]).model_dump_json(
+                        indent=2
+                    )
+            except ValueError as exc:
+                return str(exc)
         if text == "/help":
             return HELP_TEXT
         if text == "/state":

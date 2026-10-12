@@ -158,6 +158,7 @@ class BehaviorTrace(StrictModel):
     guidance: list[str] = Field(default_factory=list)
     recalled_episode_ids: list[str] = Field(default_factory=list, max_length=8)
     trait_changes: dict[str, float] = Field(default_factory=dict)
+    value_conflict: dict[str, object] = Field(default_factory=dict)
 
 
 class GoalBehaviorPolicy(StrictModel):
@@ -189,3 +190,4 @@ class PsychologyState(StrictModel):
     processed_outcomes: list[str] = Field(default_factory=list, max_length=128)
     last_behavior: BehaviorTrace | None = None
     initiative_enabled: bool = True
+    value_conflicts: list[dict[str, object]] = Field(default_factory=list, max_length=24)

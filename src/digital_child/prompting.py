@@ -39,10 +39,27 @@ def build_reply_messages(context: ReplyContext) -> list[dict[str, str]]:
         or "нет"
     )
 
+    acts = ",".join(item.value for item in context.analysis.speech_acts)
     payload = f"""РЕШЕНИЕ ЯДРА
 намерение={context.analysis.intent.value}; решение={context.decision.decision.value}
 пользователь_не_начальник={not context.decision.user_authority_assumed}
 причина={_clip(context.decision.reason, 500)}
+смысл={context.analysis.interpretation_source}; речевые_акты={acts}
+цитата={context.analysis.quoted_speech}; вероятность_иронии={context.analysis.irony_probability:.2f}
+объект_критики={context.analysis.criticism_target}
+нужно_уточнение={context.analysis.needs_clarification}
+настройки_общения={context.communication_guidance}
+оценка_навыка={_clip(context.competence_guidance, 650)}
+саморегуляция={_clip(context.regulation_guidance, 300)}
+способ_ответа={context.response_strategy}
+Для answer при clarify задай уточняющий вопрос; при propose_experiment предложи малый
+опыт в закрытой среде, не утверждая, что уже выполнил его. При answer_with_limits отвечай
+по существу с учётом доступных свидетельств. Этот выбор не отменяет отказ и границы ядра.
+Если нужно уточнение смысла, задай один конкретный вопрос, не утверждай намерение человека.
+
+СВЯЗАННЫЙ ОПЫТ И СВЕДЕНИЯ СОБЕСЕДНИКА
+личная_память={_clip(context.personal_memory_summary, 900)}
+собеседник={_clip(context.interlocutor_summary, 650)}
 
 ЛИЧНОСТЬ
 имя={context.identity.display_name}; стадия={context.development_stage}; DEU={context.total_deu:.2f}
@@ -74,7 +91,7 @@ def build_reply_messages(context: ReplyContext) -> list[dict[str, str]]:
 ЗНАНИЯ
 проверка={_clip(context.research_summary or "не проводилась", 700)}
 убеждения={_clip(context.beliefs_summary, 1100)}
-личная_память={_clip(context.personal_memory_summary, 900)}
+автобиография={_clip(context.biography_summary, 900)}
 
 ИСТОРИЯ ДИАЛОГА
 {history}

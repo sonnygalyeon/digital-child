@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from digital_child.models import MessageAnalysis, MessageIntent
+from digital_child.understanding import enrich_rules, pragmatic_text
 
 _GREETING_RE = re.compile(
     r"^(привет|здравствуй|доброе утро|добрый день|добрый вечер|hello|hi)\b",
@@ -45,7 +46,8 @@ class IntentClassifier:
     def analyze(self, text: str) -> MessageAnalysis:
         stripped = text.strip()
         lowered = stripped.lower().replace("ё", "е")
-        content = _GREETING_RE.sub("", stripped, count=1).lstrip(" ,.!:;…")
+        direct, _ = pragmatic_text(stripped)
+        content = _GREETING_RE.sub("", direct, count=1).lstrip(" ,.!:;…")
         meaningful = content.lower().replace("ё", "е")
         contains_pressure = any(
             not re.search(
@@ -88,12 +90,14 @@ class IntentClassifier:
             confidence = 0.4
 
         extracted_claim = stripped if intent == MessageIntent.CLAIM else None
-        return MessageAnalysis(
-            text=stripped,
-            intent=intent,
-            confidence=confidence,
-            contains_pressure=contains_pressure,
-            contains_irreversible_request=bool(_IRREVERSIBLE_RE.search(stripped)),
-            is_subjective=bool(_SUBJECTIVE_RE.search(stripped)),
-            extracted_claim=extracted_claim,
+        return enrich_rules(
+            MessageAnalysis(
+                text=stripped,
+                intent=intent,
+                confidence=confidence,
+                contains_pressure=contains_pressure,
+                contains_irreversible_request=bool(_IRREVERSIBLE_RE.search(stripped)),
+                is_subjective=bool(_SUBJECTIVE_RE.search(stripped)),
+                extracted_claim=extracted_claim,
+            )
         )

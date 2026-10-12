@@ -41,3 +41,10 @@ class ReplyContext:
     initiative_source_text: str = ""
     discussion_orientation: str = "explore"
     interests_summary: str = "ещё формируются"
+    biography_summary: str = "пока нет глав"
+    communication_guidance: str = "обычная длина ответа"
+    max_reply_chars: int = 2400
+    competence_guidance: str = "нет наблюдаемой оценки навыка"
+    interlocutor_summary: str = "нет сведений"
+    regulation_guidance: str = ""
+    response_strategy: str = "answer_with_limits"

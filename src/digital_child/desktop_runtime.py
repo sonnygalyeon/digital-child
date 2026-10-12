@@ -15,7 +15,7 @@ from digital_child.models import ConversationMessage
 from digital_child.service import create_agent
 
 
-def desktop_snapshot(agent: DigitalChildAgent) -> dict[str, Any]:
+def desktop_snapshot(agent: DigitalChildAgent, person_id: str = "local-user") -> dict[str, Any]:
     psyche = agent.psychology.snapshot()
     development = developmental_dynamics(agent.profile)
     active_goal = next(
@@ -29,6 +29,8 @@ def desktop_snapshot(agent: DigitalChildAgent) -> dict[str, Any]:
     return {
         "face": FaceState.from_emotion(agent.emotion).to_message()["payload"],
         "name": agent.identity.display_name,
+        "person_id": person_id,
+        "communication": agent.communication.get(person_id).model_dump(mode="json"),
         "stage": agent.profile.stage.value,
         "age": psychological_age_equivalent(agent.profile),
         "deu": agent.profile.total_deu,
@@ -39,6 +41,11 @@ def desktop_snapshot(agent: DigitalChildAgent) -> dict[str, Any]:
         "goal": None if active_goal is None else active_goal.title,
         "time": agent.clock.diagnostics(),
         "pending_verifications": agent.repository.pending_verification_count(),
+        "timeline": [
+            item.model_dump(mode="json") for item in agent.timeline.history(person_id, 30)
+        ],
+        "competence": agent.competence.diagnostics(),
+        "curriculum": [item.model_dump(mode="json") for item in agent.learning_curriculum()],
         "psychology": {
             "character": psyche.character.model_dump(mode="json"),
             "mood": psyche.mood.model_dump(mode="json"),
@@ -89,7 +96,7 @@ def run_agent_session(
         )
         send(
             "ready",
-            snapshot=desktop_snapshot(agent),
+            snapshot=desktop_snapshot(agent, router.person_id),
             opening=opening,
             history=[item.model_dump(mode="json") for item in history],
         )
@@ -100,7 +107,7 @@ def run_agent_session(
             assert agent is not None
             while not snapshot_stop.wait(1):
                 try:
-                    send("snapshot", snapshot=desktop_snapshot(agent))
+                    send("snapshot", snapshot=desktop_snapshot(agent, router.person_id))
                 except (BrokenPipeError, EOFError, OSError):
                     break
 
@@ -129,6 +136,32 @@ def run_agent_session(
                 message = connection.recv()
                 if message.get("type") == "close":
                     break
+                if message.get("type") == "timeline_detail":
+                    try:
+                        event, episodes = agent.timeline.detail(str(message.get("event_id", "")))
+                        if event.person_id not in (None, router.person_id):
+                            raise ValueError("Событие относится к другому собеседнику")
+                        send(
+                            "timeline_detail",
+                            event=event.model_dump(mode="json"),
+                            episodes=[item.model_dump(mode="json") for item in episodes],
+                            related=agent.timeline.related(event),
+                        )
+                    except ValueError as exc:
+                        send("notice", text=str(exc))
+                    continue
+                if message.get("type") == "preferences":
+                    try:
+                        patch = message.get("patch", {})
+                        if not isinstance(patch, dict):
+                            raise ValueError("Некорректные настройки общения")
+                        agent.update_communication(router.person_id, patch)
+                        send(
+                            "preferences_saved", snapshot=desktop_snapshot(agent, router.person_id)
+                        )
+                    except ValueError as exc:
+                        send("notice", text=f"Настройки не сохранены: {exc}")
+                    continue
                 if message.get("type") != "input":
                     continue
                 text = str(message.get("text", "")).strip()
@@ -153,7 +186,7 @@ def run_agent_session(
                         )
                 except Exception as exc:
                     send("error", text=f"Ошибка обработки: {exc}")
-                send("snapshot", snapshot=desktop_snapshot(agent))
+                send("snapshot", snapshot=desktop_snapshot(agent, router.person_id))
     except (BrokenPipeError, EOFError):
         pass
     except Exception as exc:

@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased — associative memory and learning
+
+- Concept-based episodic retrieval with optional budgeted LLM labels and outcome links.
+- Persistent skill estimates, recent performance, uncertainty and prediction calibration.
+- Per-person self-reported knowledge, expressed views, explanation history and corrections.
+- Curiosity curriculum with noisy, conditional and changing-rule closed environments.
+- Human demonstrations as hypotheses, independently checked by subsequent simulated actions.
+- Learned regulation choices, next-turn observations, explicit feedback and bounded idle recovery.
+- Qt development timeline with expandable changes, original episodes and source links.
+- CLI/API controls and additive storage using the existing feature records.
+- Static verification only; no tests added or run, as requested.
+
+## Unreleased — behavior, experiments and communication
+
+- Closed causal experiments with prediction error, persistent learned direction and scale transfer.
+- Daily budgets, idle-only autonomous trials and stopping after stable transfer success.
+- Structured contextual message interpretation with offline rules, quotation and irony cues.
+- Persistent value conflicts and bounded biases toward explicit behavioral compromises.
+- Evidence-linked autobiographical chapters, original episode inspection and revision history.
+- Reply review before delivery, one bounded rewrite and deterministic fallback.
+- Per-person communication preferences, quiet hours, topic snoozes and Qt settings controls.
+- CLI and HTTP controls for experiments, biography, preferences and value conflicts.
+- Existing databases gain feature storage automatically; identity reset clears those records.
+- No tests added or run, as previously requested; static validation only.
+
 ## Unreleased — initiative, time awareness and offline verification
 
 - Completed spontaneous discussion, developmental interests and per-person contact cooldowns.

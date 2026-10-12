@@ -7,7 +7,6 @@ from digital_child.models import (
     DevelopmentDomain,
     EvidenceStance,
     MessageAnalysis,
-    MessageIntent,
     Observation,
     RelationshipProfile,
     ResearchReport,
@@ -29,7 +28,7 @@ class VerificationPolicy:
     ) -> bool:
         if force:
             return True
-        if analysis.intent != MessageIntent.CLAIM:
+        if not analysis.extracted_claim:
             return False
         if analysis.is_subjective:
             return False

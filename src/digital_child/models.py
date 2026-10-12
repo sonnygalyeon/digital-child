@@ -447,6 +447,13 @@ class MessageAnalysis(StrictModel):
     contains_irreversible_request: bool = False
     is_subjective: bool = False
     extracted_claim: str | None = None
+    speech_acts: list[MessageIntent] = Field(default_factory=list, max_length=8)
+    pragmatic_text: str = ""
+    quoted_speech: bool = False
+    irony_probability: Probability = 0.0
+    criticism_target: str = "unknown"
+    needs_clarification: bool = False
+    interpretation_source: str = "rules"
 
 
 class RelationshipProfile(StrictModel):
@@ -561,6 +568,7 @@ class DeferredVerification(StrictModel):
     source: ConversationMessage
     claim: str
     behavior_trace_json: str | None = None
+    source_episode_id: str | None = None
     attempts: int = Field(default=0, ge=0)
     next_attempt_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     completed: bool = False

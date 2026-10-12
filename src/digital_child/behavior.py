@@ -11,6 +11,7 @@ from digital_child.psychology_models import (
     SituationAppraisal,
     SocialExperience,
 )
+from digital_child.value_conflicts import evaluate_value_conflict
 
 
 def choose_behavior(
@@ -44,6 +45,7 @@ def choose_behavior(
     }
     scores: dict[str, float] = {}
     decision = base
+    conflict = evaluate_value_conflict(state, appraisal)
     protected = base.user_authority_assumed or not assess_requested_action(base.input_text).allowed
     if not protected and base.intent in {MessageIntent.REQUEST, MessageIntent.COMMAND_ATTEMPT}:
         alignment = min(1.0, len(base.aligned_goal_ids) * 0.5)
@@ -83,6 +85,9 @@ def choose_behavior(
                 - 0.10 * appraisal.choice
             ),
         }
+        if conflict is not None:
+            for name, bias in conflict.biases.items():
+                scores[name] += bias
         # Habit contributes a small bias, never absolute authority.
         for habit in state.habits:
             if habit.cue == "pressure" and appraisal.pressure > 0.3:
@@ -140,6 +145,8 @@ def choose_behavior(
         if styles[style] - styles[previous.style] < 0.055:
             style = previous.style
     guidance = [development.guidance, _STYLE_GUIDANCE[style], _COPING_GUIDANCE[coping]]
+    if conflict is not None:
+        guidance.append(conflict.compromise)
     if development.identity_exploration > 0.65:
         guidance.append(
             "При конфликте предпочтений уточни, что важно тебе самому и почему, "
@@ -177,6 +184,9 @@ def choose_behavior(
         candidate_scores=scores,
         reasons=reasons,
         guidance=guidance,
+        value_conflict={}
+        if conflict is None
+        else conflict.record(sequence, decision.decision.value),
     )
 
 
