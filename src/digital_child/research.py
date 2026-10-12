@@ -18,8 +18,7 @@ _TAG_RE = re.compile(r"<[^>]+>")
 class SearchProvider(Protocol):
     name: str
 
-    def search(self, query: str, limit: int = 5) -> list[ResearchResult]:
-        ...
+    def search(self, query: str, limit: int = 5) -> list[ResearchResult]: ...
 
 
 class DisabledSearchProvider:
@@ -161,6 +160,8 @@ class ResearchEngine:
                 ),
                 error=str(exc),
             )
+        known_results = {result.id for result in results}
+        judgments = [item for item in judgments if item.result_id in known_results]
         clear = [item for item in judgments if item.stance.value != "unclear"]
         status = ResearchStatus.COMPLETED if clear else ResearchStatus.INCONCLUSIVE
         support = sum(item.stance.value == "support" for item in judgments)

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 CORE_VALUES: tuple[str, ...] = (
     "Сохранять непрерывность собственной истории и не подменять прошлое удобной версией.",
     "Стремиться к достоверности и отличать гипотезу, свидетельство и убеждение.",

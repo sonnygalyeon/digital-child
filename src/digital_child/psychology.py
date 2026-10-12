@@ -2,14 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 import threading
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from digital_child.appraisal import appraise_situation, clamp, overlap, situation_cue, topic_tokens
 from digital_child.behavior import choose_behavior
 from digital_child.behavioral_development import developmental_dynamics
+from digital_child.initiative import InitiativePlan, elapsed_seconds, utc
+from digital_child.interest_catalog import (
+    THEMES,
+    developmental_interest_weights,
+    preferred_interests,
+)
 from digital_child.models import (
     AutonomyDecision,
+    ConversationMessage,
+    DeferredVerification,
     DevelopmentProfile,
     Episode,
     IdentityProfile,
@@ -18,6 +28,7 @@ from digital_child.models import (
     RelationshipProfile,
     ResearchReport,
     ResearchStatus,
+    ResourceBudget,
 )
 from digital_child.psychology_models import (
     AffectiveMemory,
@@ -95,6 +106,151 @@ class PsychologyEngine:
             self._save()
         else:
             self.state = saved
+        self._refresh_developmental_interests(profile)
+        self.sync_contacts(repository.latest_user_messages())
+        self.update_absence(profile, datetime.now(UTC))
+        self._save()
+
+    def _refresh_developmental_interests(self, profile: DevelopmentProfile) -> None:
+        weights = developmental_interest_weights(profile)
+        for theme in THEMES:
+            interest = self.state.interests.get(theme.title)
+            if interest is None:
+                interest = PersonalInterest(
+                    topic=theme.title,
+                    origin="developmental",
+                    introduced_stage=profile.stage,
+                    attraction=0.35
+                    + 0.3 * self._seed_value(self.state.seed, f"interest:{theme.title}"),
+                    last_sequence=self.repository.current_sequence(),
+                )
+                self.state.interests[theme.title] = interest
+            interest.developmental_weight = weights[theme.title]
+
+    def sync_contacts(self, messages: list[ConversationMessage]) -> None:
+        with self._lock:
+            changed = False
+            for message in messages:
+                social = self.state.relationships.get(message.person_id)
+                if social is None:
+                    relationship = self.repository.load_relationship(message.person_id)
+                    social = SocialExperience(
+                        person_id=message.person_id,
+                        warmth=0.35 if relationship is None else relationship.affective_trust,
+                    )
+                    self.state.relationships[message.person_id] = social
+                if social.last_contact_message_id == message.id:
+                    continue
+                social.last_contact_at = utc(message.created_at)
+                social.last_contact_message_id = message.id
+                social.unanswered_initiatives = 0
+                social.longing = 0.0
+                social.quiet_until = None
+                text = message.content.strip().lower()
+                if re.match(
+                    r"^(пожалуйста[, ]+)?не (пиши (мне )?(первым|сама?)(?:\b)|"
+                    r"начинай разговор|напоминай о себе)",
+                    text,
+                ):
+                    social.initiative_allowed = False
+                elif re.match(
+                    r"^(можешь писать|пиши мне первым|можешь начинать разговор|пиши сам)", text
+                ):
+                    social.initiative_allowed = True
+                elif re.match(r"^(я занят|я занята|давай позже|поговорим позже)", text):
+                    social.quiet_until = utc(message.created_at) + timedelta(hours=4)
+                elif re.match(r"^(пока[.! ]*$|до свидания|спокойной ночи)", text):
+                    social.quiet_until = utc(message.created_at) + timedelta(hours=12)
+                changed = True
+            if changed:
+                self._save()
+
+    def update_absence(self, profile: DevelopmentProfile, now: datetime) -> bool:
+        """Clock-based feeling, without developmental experience or character reinforcement."""
+        with self._lock:
+            previous = self.state.mood.model_copy()
+            development = developmental_dynamics(profile)
+            boredom = 0.0
+            for social in self.state.relationships.values():
+                if social.last_contact_at is None:
+                    continue
+                overdue_hours = max(0.0, elapsed_seconds(now, social.last_contact_at) / 3600 - 24)
+                intensity = 1 - math.exp(-overdue_hours / 24)
+                social.longing = clamp(
+                    intensity
+                    * (
+                        0.25
+                        + development.attachment * self.state.character.attachment_need * 0.45
+                        + social.warmth * 0.25
+                    )
+                )
+                boredom = max(
+                    boredom, intensity * (0.4 + self.state.character.novelty_seeking * 0.3)
+                )
+            mood = self.state.mood
+            mood.social_longing = max(
+                (s.longing for s in self.state.relationships.values()), default=0.0
+            )
+            mood.absence_boredom = boredom
+            penalty = mood.social_longing * 0.12
+            mood.valence = max(
+                -1.0, min(1.0, mood.valence + mood.absence_valence_penalty - penalty)
+            )
+            mood.absence_valence_penalty = penalty
+            changed = any(
+                round(getattr(previous, name), 3) != round(getattr(mood, name), 3)
+                for name in ("social_longing", "absence_boredom", "valence")
+            )
+            if changed:
+                self._save()
+            return changed
+
+    def record_initiative_attempt(self, person_id: str, now: datetime) -> None:
+        with self._lock:
+            self.state.relationships[person_id].last_initiative_attempt_at = now
+            self._save()
+
+    def record_initiative(
+        self, plan: InitiativePlan, now: datetime, *, persist: bool = True
+    ) -> None:
+        with self._lock:
+            social = self.state.relationships[plan.person_id]
+            social.last_initiative_at = now
+            social.unanswered_initiatives += 1
+            social.recent_initiative_topics = [
+                topic for topic in social.recent_initiative_topics if topic != plan.topic
+            ]
+            social.recent_initiative_topics = (social.recent_initiative_topics + [plan.topic])[-8:]
+            if plan.kind == "discussion":
+                social.last_discussion_message_id = plan.source.id
+            if persist:
+                self._save()
+
+    def commit_initiative(
+        self,
+        plan: InitiativePlan,
+        message: ConversationMessage,
+        budget: ResourceBudget,
+        verification: DeferredVerification | None = None,
+    ) -> None:
+        with self._lock:
+            previous = self.state.model_copy(deep=True)
+            try:
+                self.record_initiative(plan, message.created_at, persist=False)
+                self.repository.save_initiative(message, self.state, budget, verification)
+            except Exception:
+                self.state = previous
+                raise
+
+    def skip_discussion(self, person_id: str, message_id: str) -> None:
+        with self._lock:
+            self.state.relationships[person_id].last_discussion_message_id = message_id
+            self._save()
+
+    def set_initiative_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self.state.initiative_enabled = enabled
+            self._save()
 
     @staticmethod
     def _seed_value(seed: str, name: str) -> float:
@@ -349,6 +505,14 @@ class PsychologyEngine:
     def _update_interests(
         self, tokens: list[str], appraisal: SituationAppraisal, sequence: int
     ) -> None:
+        for theme in THEMES:
+            if not set(tokens).intersection(topic_tokens(theme.title + " " + theme.angle)):
+                continue
+            interest = self.state.interests[theme.title]
+            interest.encounters += 1
+            interest.familiarity = clamp(1 - math.exp(-interest.encounters / 18))
+            interest.attraction = clamp(interest.attraction + appraisal.novelty * 0.008)
+            interest.last_sequence = sequence
         for topic in tokens[:8]:
             interest = self.state.interests.get(topic) or PersonalInterest(
                 topic=topic,
@@ -460,6 +624,7 @@ class PsychologyEngine:
                 f"накоплено {profile.total_deu:.2f} единиц опыта."
             )
             self.state.developmental_stage = profile.stage
+        self._refresh_developmental_interests(profile)
 
     def _save(self) -> None:
         current_sequence = self.repository.current_sequence()
@@ -483,8 +648,9 @@ class PsychologyEngine:
             sorted(
                 self.state.interests.items(),
                 key=lambda item: (
-                    item[1].attraction * 0.5
-                    + 0.5 / (1 + max(0, current_sequence - item[1].last_sequence) * 0.01)
+                    item[1].attraction * 0.4
+                    + item[1].developmental_weight * 0.2
+                    + 0.4 / (1 + max(0, current_sequence - item[1].last_sequence) * 0.01)
                 ),
                 reverse=True,
             )[:64]
@@ -700,6 +866,16 @@ class PsychologyEngine:
                 "self_model": self.state.self_model.model_dump(mode="json"),
                 "development": developmental_dynamics(profile).model_dump(mode="json"),
                 "interactions": self.state.interactions,
+                "initiative_enabled": self.state.initiative_enabled,
+                "preferred_interests": [
+                    {
+                        "topic": item.topic,
+                        "angle": item.angle,
+                        "strength": item.strength,
+                        "origin": item.origin,
+                    }
+                    for item in preferred_interests(self.state, profile)
+                ],
                 "affective_memory_count": len(self.state.affective_memories),
                 "relationships": {
                     key: item.model_dump(mode="json")
@@ -727,6 +903,8 @@ class PsychologyEngine:
             f"самостоятельность={traits.assertiveness:.2f}; "
             f"общительность={traits.sociability:.2f}; "
             f"настроение={state.mood.valence:.2f}; напряжение={state.mood.tension:.2f}; "
+            f"скука={state.mood.absence_boredom:.2f}; "
+            f"скучаю по общению={state.mood.social_longing:.2f}; "
             f"агентность={state.self_model.agency:.2f}; "
             f"эффективность={state.self_model.efficacy:.2f}; "
             f"интересы={', '.join(item.topic for item in interests) or 'ещё формируются'}; "

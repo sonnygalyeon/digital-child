@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 from digital_child.models import (
@@ -15,6 +18,7 @@ from digital_child.models import (
     CognitiveLoopStatus,
     ConversationMessage,
     ConversationRole,
+    DeferredVerification,
     DevelopmentProfile,
     EmotionState,
     Episode,
@@ -41,13 +45,30 @@ class SQLiteRepository:
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._transaction_sequence = 0
         self.connection = sqlite3.connect(self.database_path, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self._initialize()
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Nested writers release savepoints without committing the enclosing outcome."""
+        with self._lock:
+            self._transaction_sequence += 1
+            name = f"write_{self._transaction_sequence}"
+            self.connection.execute(f"SAVEPOINT {name}")
+            try:
+                yield
+            except BaseException:
+                self.connection.execute(f"ROLLBACK TO {name}")
+                self.connection.execute(f"RELEASE {name}")
+                raise
+            else:
+                self.connection.execute(f"RELEASE {name}")
+
     def _initialize(self) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS episodes (
@@ -211,6 +232,18 @@ class SQLiteRepository:
                 """
             )
             self.connection.execute(
+                """CREATE TABLE IF NOT EXISTS runtime_state (
+                    name TEXT PRIMARY KEY, payload_json TEXT NOT NULL
+                )"""
+            )
+            self.connection.execute(
+                """CREATE TABLE IF NOT EXISTS deferred_verifications (
+                    id TEXT PRIMARY KEY, source_message_id TEXT UNIQUE NOT NULL,
+                    completed INTEGER NOT NULL, notified INTEGER NOT NULL,
+                    next_attempt_at TEXT NOT NULL, task_json TEXT NOT NULL
+                )"""
+            )
+            self.connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS audit_events (
                     id TEXT PRIMARY KEY,
@@ -332,7 +365,7 @@ class SQLiteRepository:
     def save_episode(self, episode: Episode) -> Episode:
         sequence = self.current_sequence() + 1
         stored = episode.model_copy(update={"sequence": sequence})
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO episodes (
@@ -409,7 +442,7 @@ class SQLiteRepository:
         )
 
     def save_source(self, source: SourceRecord) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO sources (
@@ -484,7 +517,7 @@ class SQLiteRepository:
         return source
 
     def save_belief(self, belief: Belief) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO beliefs (
@@ -565,7 +598,7 @@ class SQLiteRepository:
         )
 
     def save_evidence(self, evidence: EvidenceRecord) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO evidence (
@@ -616,7 +649,7 @@ class SQLiteRepository:
 
         decayed = 0
         archived = 0
-        with self._lock, self.connection:
+        with self.transaction():
             for row in rows:
                 last_sequence = max(int(row["sequence"]), int(row["last_decay_sequence"]))
                 interference = max(0, current_sequence - last_sequence)
@@ -656,7 +689,7 @@ class SQLiteRepository:
 
         created = 0
         updated = 0
-        with self._lock, self.connection:
+        with self.transaction():
             for group in groups:
                 representative = self.connection.execute(
                     """
@@ -756,7 +789,7 @@ class SQLiteRepository:
         return source
 
     def save_identity(self, identity: IdentityProfile) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO identity (singleton_id, identity_json)
@@ -775,7 +808,7 @@ class SQLiteRepository:
         return None if row is None else IdentityProfile.model_validate_json(row["identity_json"])
 
     def save_genesis_event(self, event: GenesisEvent) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT OR REPLACE INTO genesis_events (id, created_at, event_json)
@@ -792,7 +825,7 @@ class SQLiteRepository:
         return None if row is None else GenesisEvent.model_validate_json(row["event_json"])
 
     def save_goal(self, goal: Goal) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO goals (id, created_at, status, priority, goal_json)
@@ -824,7 +857,7 @@ class SQLiteRepository:
         return [Goal.model_validate_json(row["goal_json"]) for row in rows]
 
     def save_relationship(self, relationship: RelationshipProfile) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO relationships (person_id, updated_at, relationship_json)
@@ -853,7 +886,7 @@ class SQLiteRepository:
         )
 
     def save_trust_event(self, event: TrustEvent) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO trust_events (id, created_at, person_id, event_json)
@@ -863,7 +896,7 @@ class SQLiteRepository:
             )
 
     def save_decision(self, decision: AutonomyDecision) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO decisions (id, created_at, person_id, decision_json)
@@ -886,7 +919,7 @@ class SQLiteRepository:
         return [AutonomyDecision.model_validate_json(row["decision_json"]) for row in rows]
 
     def save_research_report(self, report: ResearchReport) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT OR REPLACE INTO research_reports (id, created_at, status, report_json)
@@ -910,7 +943,7 @@ class SQLiteRepository:
 
     def save_audit(self, event_type: str, payload: dict[str, object]) -> AuditEvent:
         event = AuditEvent(event_type=event_type, payload=payload)
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO audit_events (id, created_at, event_type, payload_json)
@@ -942,7 +975,7 @@ class SQLiteRepository:
         ]
 
     def save_conversation_message(self, message: ConversationMessage) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO conversation_messages (
@@ -964,6 +997,160 @@ class SQLiteRepository:
                 ),
             )
 
+    def save_initiative(
+        self,
+        message: ConversationMessage,
+        psychology: PsychologyState,
+        budget: ResourceBudget,
+        verification: DeferredVerification | None = None,
+    ) -> None:
+        """Commit delivery, its cooldown and the daily budget in one SQLite transaction."""
+        with self.transaction():
+            self.connection.execute(
+                """INSERT INTO conversation_messages (
+                    id, created_at, person_id, role, content, intent,
+                    decision_id, backend, model, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    message.id,
+                    message.created_at.isoformat(),
+                    message.person_id,
+                    message.role.value,
+                    message.content,
+                    None if message.intent is None else message.intent.value,
+                    message.decision_id,
+                    message.backend,
+                    message.model,
+                    json.dumps(message.metadata, ensure_ascii=False),
+                ),
+            )
+            self.connection.execute(
+                """INSERT INTO psychology_state (singleton_id, state_json) VALUES (1, ?)
+                ON CONFLICT(singleton_id) DO UPDATE SET state_json = excluded.state_json""",
+                (psychology.model_dump_json(),),
+            )
+            self.connection.execute(
+                """INSERT INTO resource_budgets (name, window_key, budget_json) VALUES (?, ?, ?)
+                ON CONFLICT(name, window_key) DO UPDATE SET budget_json = excluded.budget_json""",
+                (budget.name, budget.window_key, budget.model_dump_json()),
+            )
+            if verification is not None:
+                self.save_verification(verification.model_copy(update={"notified": True}))
+
+    def load_runtime_state(self, name: str) -> dict[str, object]:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT payload_json FROM runtime_state WHERE name = ?", (name,)
+            ).fetchone()
+        return {} if row is None else dict(json.loads(row["payload_json"]))
+
+    def save_runtime_state(self, name: str, payload: dict[str, object]) -> None:
+        with self.transaction():
+            self.connection.execute(
+                """INSERT INTO runtime_state VALUES (?, ?)
+                ON CONFLICT(name) DO UPDATE SET payload_json = excluded.payload_json""",
+                (name, json.dumps(payload, ensure_ascii=False)),
+            )
+
+    def save_verification(self, task: DeferredVerification) -> None:
+        with self.transaction():
+            self.connection.execute(
+                """INSERT INTO deferred_verifications VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET completed = excluded.completed,
+                notified = excluded.notified, next_attempt_at = excluded.next_attempt_at,
+                task_json = excluded.task_json""",
+                (
+                    task.id,
+                    task.source.id,
+                    task.completed,
+                    task.notified,
+                    task.next_attempt_at.isoformat(),
+                    task.model_dump_json(),
+                ),
+            )
+
+    def due_verifications(self, now: datetime, limit: int = 1) -> list[DeferredVerification]:
+        with self._lock:
+            rows = self.connection.execute(
+                """SELECT task_json FROM deferred_verifications WHERE completed = 0
+                AND next_attempt_at <= ? ORDER BY next_attempt_at, rowid LIMIT ?""",
+                (now.isoformat(), max(1, min(limit, 100))),
+            ).fetchall()
+        return [DeferredVerification.model_validate_json(row["task_json"]) for row in rows]
+
+    def verification_notices(self, limit: int = 20) -> list[DeferredVerification]:
+        with self._lock:
+            rows = self.connection.execute(
+                """SELECT task_json FROM deferred_verifications WHERE completed = 1
+                AND notified = 0 ORDER BY rowid LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [DeferredVerification.model_validate_json(row["task_json"]) for row in rows]
+
+    def pending_verification_count(self) -> int:
+        with self._lock:
+            return int(
+                self.connection.execute(
+                    "SELECT COUNT(*) FROM deferred_verifications WHERE completed = 0"
+                ).fetchone()[0]
+            )
+
+    def list_verifications(self, limit: int = 20) -> list[DeferredVerification]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT task_json FROM deferred_verifications ORDER BY rowid DESC LIMIT ?",
+                (max(1, min(limit, 500)),),
+            ).fetchall()
+        return [DeferredVerification.model_validate_json(row["task_json"]) for row in rows]
+
+    def untracked_claim_messages(self, limit: int = 500) -> list[ConversationMessage]:
+        with self._lock:
+            rows = self.connection.execute(
+                """SELECT c.* FROM conversation_messages c WHERE role = 'user' AND intent = 'claim'
+                AND NOT EXISTS (SELECT 1 FROM deferred_verifications v
+                    WHERE v.source_message_id = c.id)
+                ORDER BY c.rowid DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [
+            ConversationMessage(
+                id=row["id"],
+                created_at=row["created_at"],
+                person_id=row["person_id"],
+                role=ConversationRole.USER,
+                content=row["content"],
+                intent=row["intent"],
+                metadata=json.loads(row["metadata_json"]),
+            )
+            for row in rows
+        ]
+
+    def latest_user_messages(self, limit: int = 64) -> list[ConversationMessage]:
+        """Last actual human input per person; agent output never resets the absence clock."""
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM (
+                    SELECT rowid, *, ROW_NUMBER() OVER (
+                        PARTITION BY person_id ORDER BY rowid DESC
+                    ) AS position FROM conversation_messages WHERE role = 'user'
+                ) WHERE position = 1 ORDER BY rowid DESC LIMIT ?
+                """,
+                (max(0, min(limit, 64)),),
+            ).fetchall()
+        return [
+            ConversationMessage(
+                id=row["id"],
+                created_at=row["created_at"],
+                person_id=row["person_id"],
+                role=ConversationRole.USER,
+                content=row["content"],
+                intent=row["intent"],
+                metadata=json.loads(row["metadata_json"]),
+            )
+            for row in rows
+        ]
+
     def recent_conversation(
         self,
         person_id: str,
@@ -976,7 +1163,7 @@ class SQLiteRepository:
                 """
                 SELECT * FROM conversation_messages
                 WHERE person_id = ?
-                ORDER BY created_at DESC
+                ORDER BY rowid DESC
                 LIMIT ?
                 """,
                 (person_id, limit),
@@ -999,7 +1186,7 @@ class SQLiteRepository:
         return list(reversed(messages))
 
     def save_need(self, need: NeedState) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO needs (
@@ -1040,7 +1227,7 @@ class SQLiteRepository:
                 ).fetchone()[0]
             )
         stored = event.model_copy(update={"sequence": sequence})
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO cognitive_events (
@@ -1059,7 +1246,7 @@ class SQLiteRepository:
         return stored
 
     def mark_cognitive_event_processed(self, event_id: str) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             row = self.connection.execute(
                 "SELECT event_json FROM cognitive_events WHERE id = ?",
                 (event_id,),
@@ -1095,7 +1282,7 @@ class SQLiteRepository:
         return [CognitiveEvent.model_validate_json(row["event_json"]) for row in rows]
 
     def save_cognitive_loop_status(self, status: CognitiveLoopStatus) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO cognitive_loop_state (singleton_id, status_json)
@@ -1113,7 +1300,7 @@ class SQLiteRepository:
         return None if row is None else CognitiveLoopStatus.model_validate_json(row["status_json"])
 
     def save_budget(self, budget: ResourceBudget) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO resource_budgets (name, window_key, budget_json)
@@ -1136,7 +1323,7 @@ class SQLiteRepository:
         return None if row is None else ResourceBudget.model_validate_json(row["budget_json"])
 
     def save_psychology(self, state: PsychologyState) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO psychology_state (singleton_id, state_json) VALUES (1, ?)
@@ -1153,7 +1340,7 @@ class SQLiteRepository:
         return None if row is None else PsychologyState.model_validate_json(row["state_json"])
 
     def save_snapshot(self, snapshot: AgentSnapshot) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             self.connection.execute(
                 """
                 INSERT INTO agent_snapshot (
@@ -1193,8 +1380,9 @@ class SQLiteRepository:
         )
 
     def reset(self) -> None:
-        with self._lock, self.connection:
+        with self.transaction():
             for table in (
+                "deferred_verifications",
                 "psychology_state",
                 "resource_budgets",
                 "cognitive_loop_state",

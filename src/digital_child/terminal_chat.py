@@ -23,6 +23,10 @@ _COMMANDS = [
     "/history",
     "/identity",
     "/personality",
+    "/interests",
+    "/initiative",
+    "/initiative on",
+    "/initiative off",
     "/development",
     "/behavior",
     "/habits",
@@ -151,6 +155,10 @@ class TerminalChatApp:
             HTML(f"<warning>↳ {self._escape(message)}</warning>"),
             style=_STYLE,
         )
+
+    def notify_initiative(self, message: str) -> None:
+        self._print_agent(message)
+        self._print_metadata("[самостоятельная реплика]")
 
     def _on_token(self, token: str) -> None:
         if self._first_token:

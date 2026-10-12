@@ -158,6 +158,7 @@ class EmotionName(str, Enum):
     PROUD = "proud"
     AFFECTIONATE = "affectionate"
     BORED = "bored"
+    MISSING_CONTACT = "missing_contact"
 
 
 class ConversationRole(str, Enum):
@@ -335,7 +336,7 @@ class GoalArbitration(StrictModel):
 class ResourceBudget(StrictModel):
     name: str
     window_key: str
-    limit: int = Field(gt=0)
+    limit: int = Field(ge=0)
     used: int = Field(default=0, ge=0)
 
     @property
@@ -538,6 +539,7 @@ class EmotionState(StrictModel):
     affection: Probability = 0.0
     pride: Probability = 0.0
     boredom: Probability = 0.0
+    longing: Probability = 0.0
     regulation: Probability = 0.15
 
 
@@ -552,6 +554,18 @@ class ConversationMessage(StrictModel):
     backend: str | None = None
     model: str | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class DeferredVerification(StrictModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    source: ConversationMessage
+    claim: str
+    behavior_trace_json: str | None = None
+    attempts: int = Field(default=0, ge=0)
+    next_attempt_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    completed: bool = False
+    notified: bool = False
+    report: ResearchReport | None = None
 
 
 class LLMHealth(StrictModel):

@@ -34,6 +34,9 @@ class MoodState(StrictModel):
     social_safety: Probability = 0.45
     engagement: Probability = 0.5
     mental_load: Probability = 0.1
+    social_longing: Probability = 0.0
+    absence_boredom: Probability = 0.0
+    absence_valence_penalty: Probability = 0.0
 
 
 class SelfModel(StrictModel):
@@ -54,6 +57,16 @@ class SocialExperience(StrictModel):
     repair_progress: Probability = 0.0
     consistent_respect: int = Field(default=0, ge=0)
     last_sequence: int = Field(default=0, ge=0)
+    last_contact_at: datetime | None = None
+    last_contact_message_id: str | None = None
+    longing: Probability = 0.0
+    last_initiative_at: datetime | None = None
+    last_initiative_attempt_at: datetime | None = None
+    last_discussion_message_id: str | None = None
+    unanswered_initiatives: int = Field(default=0, ge=0)
+    initiative_allowed: bool = True
+    quiet_until: datetime | None = None
+    recent_initiative_topics: list[str] = Field(default_factory=list, max_length=8)
 
 
 class AffectiveMemory(StrictModel):
@@ -83,6 +96,9 @@ class PersonalInterest(StrictModel):
     familiarity: Probability = 0.0
     encounters: int = Field(default=0, ge=0)
     last_sequence: int = Field(default=0, ge=0)
+    origin: str = "experience"
+    introduced_stage: DevelopmentStage | None = None
+    developmental_weight: Probability = 0.0
 
 
 class BehavioralCommitment(StrictModel):
@@ -172,3 +188,4 @@ class PsychologyState(StrictModel):
     reflections: list[str] = Field(default_factory=list, max_length=24)
     processed_outcomes: list[str] = Field(default_factory=list, max_length=128)
     last_behavior: BehaviorTrace | None = None
+    initiative_enabled: bool = True

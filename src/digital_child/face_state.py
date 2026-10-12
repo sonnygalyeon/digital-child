@@ -22,6 +22,7 @@ class FaceState:
     frustration: float = 0.0
     anxiety: float = 0.0
     boredom: float = 0.0
+    longing: float = 0.0
     regulation: float = 0.15
 
     @classmethod
@@ -50,6 +51,7 @@ class FaceState:
             frustration=emotion.frustration,
             anxiety=emotion.anxiety,
             boredom=emotion.boredom,
+            longing=emotion.longing,
             regulation=emotion.regulation,
         )
 

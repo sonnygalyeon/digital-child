@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — initiative, time awareness and offline verification
+
+- Completed spontaneous discussion, developmental interests and per-person contact cooldowns.
+- Longing and absence boredom after 24 hours, restored across application launches.
+- Separate cancellable generation worker, persistent daily message budget and contact opt-out.
+- HTTPS Date clock refresh with saved UTC correction and monotonic in-session timing.
+- Durable factual verification queue with bounded retry, startup recovery and legacy claim import.
+- Atomic evidence/trust/outcome updates using nested SQLite savepoints.
+- Evidence-linked discussion of contradicted earlier claims without assuming deliberate deception.
+- Interests and connection status in Qt, CLI controls and time/verification HTTP diagnostics.
+- Fixed missing FastAPI dependency import and desktop process typing.
+- Static checks only; no tests added or run, preserving the user's earlier instruction.
+
 ## Unreleased — developmental psychology and desktop sphere
 
 - Persistent subject-specific temperament, slowly adapting character and personal values.

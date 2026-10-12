@@ -34,3 +34,10 @@ class ReplyContext:
     behavior_guidance: tuple[str, ...] = ()
     behavior_style: str = "direct"
     coping_strategy: str = "respond"
+    interaction_mode: str = "reply"
+    initiative_reason: str = ""
+    initiative_topic: str = ""
+    initiative_angle: str = ""
+    initiative_source_text: str = ""
+    discussion_orientation: str = "explore"
+    interests_summary: str = "ещё формируются"

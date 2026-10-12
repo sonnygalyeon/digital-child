@@ -92,6 +92,7 @@ _EMOTIONS = {
     "proud": "Удовлетворение достижением",
     "affectionate": "Тёплое отношение",
     "bored": "Скука",
+    "missing_contact": "Скучаю по общению",
 }
 _STAGES = {
     "newborn": "Первое пробуждение",
@@ -182,6 +183,7 @@ class DesktopWindow(QMainWindow):
         self.close_deadline = 0.0
         self.face = FaceState()
         self.reply: MessageCard | None = None
+        self._history_ids: set[str] = set()
         self.loop_running = False
         self.loop_paused = False
         self.settings = QSettings("DigitalChild", "Desktop")
@@ -260,6 +262,8 @@ class DesktopWindow(QMainWindow):
                     ("trust", "Доверие"),
                     ("arousal", "Возбуждение"),
                     ("fatigue", "Усталость"),
+                    ("boredom", "Скука"),
+                    ("longing", "Нехватка общения"),
                 ],
                 self.emotion_bars,
             ),
@@ -280,6 +284,16 @@ class DesktopWindow(QMainWindow):
             self.personality_bars,
         )
         tabs.addTab(personality_panel, "Личность")
+        interests_panel = QWidget()
+        interests_layout = QVBoxLayout(interests_panel)
+        self.interests_label = _label("Интересы формируются…", "muted", wrap=True)
+        interests_layout.addWidget(self.interests_label)
+        self.initiative_label = _label("", "muted", wrap=True)
+        interests_layout.addWidget(self.initiative_label)
+        self.connection_label = _label("", "muted", wrap=True)
+        interests_layout.addWidget(self.connection_label)
+        interests_layout.addStretch()
+        tabs.addTab(interests_panel, "Интересы")
         layout.addWidget(tabs)
         self.goal_label = _label("Текущая цель появится после загрузки", "muted", wrap=True)
         self.goal_label.setMaximumHeight(54)
@@ -337,6 +351,7 @@ class DesktopWindow(QMainWindow):
             ("Память", "/memory"),
             ("Убеждения", "/beliefs"),
             ("Цели", "/goals"),
+            ("Инициатива", "/initiative"),
             ("Справка", "/help"),
         ):
             button = QPushButton(title)
@@ -450,7 +465,8 @@ class DesktopWindow(QMainWindow):
         if kind == "ready":
             self.ready = True
             for item in message.get("history", []):
-                self._add_card(MessageCard(item["role"], item["content"]))
+                self._history_ids.add(item["id"])
+                self._add_conversation_card(item)
             for line in message.get("opening", []):
                 self._notice(line)
             self._apply_snapshot(message["snapshot"])
@@ -503,6 +519,28 @@ class DesktopWindow(QMainWindow):
                 self._update_controls()
         elif kind == "notice":
             self._notice(message["text"])
+        elif kind == "initiative":
+            item = message["message"]
+            if item["id"] not in self._history_ids:
+                self._history_ids.add(item["id"])
+                self._add_conversation_card(item)
+                if not self.busy:
+                    self.activity_label.setText("Агент сам предложил продолжить разговор")
+
+    def _add_conversation_card(self, item: dict[str, Any]) -> None:
+        card = MessageCard(item["role"], item["content"])
+        metadata = item.get("metadata", {})
+        if metadata.get("initiative"):
+            triggers = {
+                "reconnect": "Возвращение к общению",
+                "discussion": "Продолжение дискуссии",
+                "interest": "Личный интерес",
+                "verification": "Обсуждение проверки фактов",
+            }
+            label = triggers.get(metadata.get("trigger"), "Самостоятельная реплика")
+            card.metadata.setText(f"{label} · {metadata.get('topic', '')}")
+            card.metadata.show()
+        self._add_card(card)
 
     def _apply_snapshot(self, snapshot: dict[str, Any]) -> None:
         self.face = FaceState.from_payload(snapshot["face"])
@@ -513,6 +551,24 @@ class DesktopWindow(QMainWindow):
         )
         self.stage_label.setToolTip(f"Условный индекс возраста: {snapshot['age']:.2f}")
         psychology = snapshot.get("psychology", {})
+        self.interests_label.setText(
+            "Сейчас мне интересны:\n\n"
+            + "\n".join("• " + topic for topic in psychology.get("interests", []))
+        )
+        self.initiative_label.setText(
+            "Могу самостоятельно продолжать разговор и предлагать темы."
+            if psychology.get("initiative_enabled", False)
+            else "Самостоятельные сообщения отключены."
+        )
+        clock = snapshot.get("time", {})
+        time_label = (
+            "Время сверено с интернетом"
+            if clock.get("source") == "https_date" and not clock.get("error")
+            else "Время по локальным часам с последней известной поправкой"
+        )
+        self.connection_label.setText(
+            f"{time_label}.\nОжидают проверки: {snapshot.get('pending_verifications', 0)}."
+        )
         personality = dict(psychology.get("character", {}))
         personality["regulation"] = psychology.get("regulation", 0.0)
         personality["efficacy"] = psychology.get("self_model", {}).get("efficacy", 0.0)

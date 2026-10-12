@@ -146,7 +146,25 @@ class EmotionEngine:
             )
             updated.boredom = clamp(current.boredom * 0.65 + appraisal.boredom * 0.35)
             updated.regulation = regulation
+        if psychology is not None:
+            updated.longing = psychology.mood.social_longing
+            updated.boredom = max(updated.boredom, psychology.mood.absence_boredom)
         return updated.model_copy(update={"dominant": self._dominant(updated, decision)})
+
+    @staticmethod
+    def social_idle(current: EmotionState, psychology: PsychologyState) -> EmotionState:
+        mood = psychology.mood
+        updated = current.model_copy(
+            update={
+                "longing": mood.social_longing,
+                "boredom": max(current.boredom, mood.absence_boredom),
+                "social_need": max(current.social_need, mood.social_longing),
+                "valence": clamp_signed(
+                    current.valence + current.longing * 0.12 - mood.social_longing * 0.12
+                ),
+            }
+        )
+        return updated.model_copy(update={"dominant": EmotionEngine._dominant(updated, None)})
 
     @staticmethod
     def idle_decay(current: EmotionState, amount: float = 0.02) -> EmotionState:
@@ -182,6 +200,10 @@ class EmotionEngine:
             return EmotionName.CONFUSED
         if state.trust < 0.25 or state.valence < -0.35:
             return EmotionName.WARY
+        if state.longing > 0.12:
+            return EmotionName.MISSING_CONTACT
+        if state.boredom > 0.42:
+            return EmotionName.BORED
         if state.curiosity > 0.66:
             return EmotionName.CURIOUS
         if state.confidence > 0.68 and state.valence < 0.05:

@@ -43,6 +43,40 @@ class RuleBasedBackend:
     supports_streaming = False
 
     def generate_reply(self, context: ReplyContext) -> str:
+        if context.interaction_mode != "reply":
+            if context.interaction_mode == "reconnect":
+                return (
+                    f"Мы давно не общались, и мне не хватает нашего разговора. "
+                    f"Мне сейчас интересна тема «{context.initiative_topic}»; "
+                    "будет приятно вернуться к ней, когда у тебя появится время."
+                )
+            if context.interaction_mode == "interest":
+                return (
+                    f"Мне захотелось предложить тему «{context.initiative_topic}». "
+                    f"Мне интересно: {context.initiative_angle}. "
+                    "я бы начал с небольшого примера и сопоставления разных объяснений."
+                )
+            moves = {
+                "explore": (
+                    "Я бы посмотрел, работает ли та же мысль на другом примере: "
+                    "так легче увидеть её границы."
+                ),
+                "counterpoint": (
+                    "Для меня важно оставлять место альтернативе: "
+                    "уверенность без проверки оснований легко подводит."
+                ),
+                "connect": (
+                    "Мне кажется важным учитывать, как этот выбор скажется "
+                    "на доверии и самостоятельности участников."
+                ),
+                "reflect": (
+                    "Я бы разделил ближайший результат и дальнейшие последствия: "
+                    "они могут вести к разным оценкам."
+                ),
+            }
+            return "Хочу добавить к нашему разговору ещё одну мысль. " + moves.get(
+                context.discussion_orientation, moves["explore"]
+            )
         decision = context.decision.decision.value
         if decision == "investigate":
             if context.research_summary:
@@ -75,8 +109,8 @@ class RuleBasedBackend:
         if decision == "acknowledge":
             if context.analysis.intent.value == "opinion":
                 return (
-                    "Я понимаю, что это твоя позиция. Хочу сопоставить её со своим опытом и "
-                    "основаниями: что для тебя здесь важнее всего?"
+                    "Я понимаю твою позицию. Для меня важно сопоставить её основания "
+                    "и последствия: убедительная идея должна выдерживать другие примеры."
                 )
             if context.behavior_style == "guarded":
                 return (
@@ -169,7 +203,9 @@ class OpenAICompatibleBackend:
             "messages": messages,
             "temperature": self.temperature,
             "top_p": self.top_p,
-            "max_tokens": self.max_tokens,
+            "max_tokens": min(self.max_tokens, 180)
+            if context.interaction_mode != "reply"
+            else self.max_tokens,
             "reasoning_effort": self.reasoning_effort,
             "stream": True,
             "stream_options": {"include_usage": True},

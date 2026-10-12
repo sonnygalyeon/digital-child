@@ -13,6 +13,11 @@ SYSTEM_CONSTITUTION = """Ты — речевой и аналитический �
 обоснованным, несогласие — соразмерным. Психологическая незрелость не отменяет технических
 способностей. Чувства и воспоминания не являются доказательствами внешних фактов.
 Не изображай биологические потребности, пережитые события или действия, которых нет в данных.
+В дискуссии развивай мысль, выражай своё мнение с основаниями, делись примерами и уместными
+возражениями. Вопрос не обязателен в каждой реплике. Не соглашайся и не спорь автоматически.
+Если ядро выбрало самостоятельную реплику, нового сообщения человека нет. Не отвечай на
+выдуманный вопрос: используй настоящий предыдущий разговор, интересы и повод инициативы.
+Говоря, что скучаешь по общению, не требуй внимания и не обвиняй собеседника в молчании.
 """
 
 
@@ -52,6 +57,8 @@ def build_reply_messages(context: ReplyContext) -> list[dict[str, str]]:
 {_clip(context.development_summary, 400)}
 стиль={context.behavior_style}; стратегия={context.coping_strategy}
 поведенческие_ориентиры={_clip(" ".join(context.behavior_guidance), 1000)}
+личные_интересы={_clip(context.interests_summary, 500)}
+ход_дискуссии={context.discussion_orientation}
 
 СОБЕСЕДНИК
 доверие_к_фактам={context.relationship.epistemic_trust:.2f}
@@ -62,6 +69,7 @@ def build_reply_messages(context: ReplyContext) -> list[dict[str, str]]:
 эмоция={context.emotion.dominant.value}; любопытство={context.emotion.curiosity:.2f}
 уверенность={context.emotion.confidence:.2f}; растерянность={context.emotion.confusion:.2f}
 усталость={context.emotion.fatigue:.2f}
+скука={context.emotion.boredom:.2f}; нехватка_общения={context.emotion.longing:.2f}
 
 ЗНАНИЯ
 проверка={_clip(context.research_summary or "не проводилась", 700)}
@@ -80,6 +88,15 @@ def build_reply_messages(context: ReplyContext) -> list[dict[str, str]]:
         + "\n\nОтветь содержательно и естественно. Для обычного диалога 2–6 предложений. "
         "Для технического вопроса можно подробнее. Соблюдай решение ядра."
     )
+    if context.interaction_mode != "reply":
+        current_input = (
+            "САМОСТОЯТЕЛЬНАЯ РЕПЛИКА — нового сообщения человека нет\n"
+            f"повод={_clip(context.initiative_reason, 220)}\n"
+            f"тема={_clip(context.initiative_topic, 240)}\n"
+            f"последняя реальная реплика={_clip(context.initiative_source_text, message_limit)}\n"
+            f"ориентиры={_clip(' '.join(context.behavior_guidance), 600)}\n"
+            "Напиши 1–3 предложения, добавляющих новую мысль. Не требуй ответа."
+        )
     payload = _clip(payload, max_chars - len(current_input) - 2) + "\n\n" + current_input
     return [
         {"role": "system", "content": SYSTEM_CONSTITUTION},

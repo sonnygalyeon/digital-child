@@ -33,12 +33,13 @@ class CognitiveLoop:
         notifier: Callable[[str], None] | None = None,
         heartbeat_seconds: float = 5.0,
         behavior_policy_getter: Callable[[], GoalBehaviorPolicy] | None = None,
+        clock_now: Callable[[], datetime] | None = None,
     ) -> None:
         self.repository = repository
         self.need_engine = NeedEngine(repository)
         self.drive_engine = DriveEngine()
         self.goal_arbiter = GoalArbiter()
-        self.budgets = BudgetManager(repository)
+        self.budgets = BudgetManager(repository, now=clock_now)
         self.bus = CognitiveEventBus()
         self.notifier = notifier
         self.behavior_policy_getter = behavior_policy_getter

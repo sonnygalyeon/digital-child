@@ -72,6 +72,10 @@ HELP_TEXT = """Команды:
   /drives                       активные внутренние импульсы
   /background                   состояние когнитивного цикла
   /budgets                      операционные бюджеты автономии
+  /interests                    текущие интересы с учётом стадии и опыта
+  /initiative [on|off]           самостоятельные реплики и их состояние
+  /time                         источник UTC и время предыдущего запуска
+  /verifications                отложенные проверки фактов и их результаты
   /events [N]                   последние внутренние события
   /pause                        приостановить внутренний цикл
   /resume                       возобновить внутренний цикл
@@ -140,6 +144,24 @@ class ChatCommandRouter:
             return "\n".join(f"- [{item.role.value}] {item.content}" for item in messages)
         if text == "/identity":
             return self.agent.identity.model_dump_json(indent=2)
+        if text == "/interests":
+            data = self.agent.psychology.diagnostics(self.agent.profile)
+            return json.dumps(data["preferred_interests"], ensure_ascii=False, indent=2)
+        if text in {"/initiative", "/initiative on", "/initiative off"}:
+            if text != "/initiative":
+                self.agent.set_initiative_enabled(text.endswith(" on"))
+            return json.dumps(self.agent.initiative_status(), ensure_ascii=False, indent=2)
+        if text == "/time":
+            return json.dumps(self.agent.clock.diagnostics(), ensure_ascii=False, indent=2)
+        if text == "/verifications":
+            return json.dumps(
+                [
+                    item.model_dump(mode="json")
+                    for item in self.agent.repository.list_verifications()
+                ],
+                ensure_ascii=False,
+                indent=2,
+            )
         if text in {"/personality", "/development", "/behavior", "/habits", "/reflections"}:
             data = self.agent.psychology.diagnostics(self.agent.profile)
             selection = {
@@ -414,6 +436,13 @@ def _opening_lines(agent: DigitalChildAgent) -> list[str]:
 def run_plain_chat(database_path: Path, auto_research: bool, cognitive_loop: bool = True) -> None:
     agent = create_agent(database_path, auto_research=auto_research)
     router = ChatCommandRouter(agent)
+    agent.set_initiative_notifier(
+        lambda message: (
+            print(f"\nАгент> {message.content}\n[самостоятельная реплика]")
+            if message.person_id == router.person_id
+            else None
+        )
+    )
     if cognitive_loop:
         agent.start_cognitive_loop()
     try:
@@ -459,6 +488,13 @@ def run_desktop_chat(
         face=face,
     )
     agent.set_background_notifier(app.notify)
+    agent.set_initiative_notifier(
+        lambda message: (
+            app.notify_initiative(message.content)
+            if message.person_id == router.person_id
+            else None
+        )
+    )
     if cognitive_loop:
         agent.start_cognitive_loop()
     try:

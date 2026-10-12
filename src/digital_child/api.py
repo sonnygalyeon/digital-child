@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import cast
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from digital_child import __version__
@@ -21,6 +21,7 @@ from digital_child.models import (
     ConsolidationReport,
     ConversationMessage,
     CycleResult,
+    DeferredVerification,
     DevelopmentProfile,
     DriveSignal,
     EmotionState,
@@ -113,6 +114,29 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     def psychology(request: Request) -> dict[str, object]:
         agent = get_agent(request)
         return agent.psychology.diagnostics(agent.profile)
+
+    @application.get("/v1/initiative")
+    def initiative(request: Request) -> dict[str, object]:
+        return get_agent(request).initiative_status()
+
+    @application.post("/v1/initiative/{enabled}", dependencies=[Depends(require_operator)])
+    def configure_initiative(enabled: bool, request: Request) -> dict[str, object]:
+        agent = get_agent(request)
+        agent.set_initiative_enabled(enabled)
+        return agent.initiative_status()
+
+    @application.get("/v1/interests")
+    def interests(request: Request) -> object:
+        agent = get_agent(request)
+        return agent.psychology.diagnostics(agent.profile)["preferred_interests"]
+
+    @application.get("/v1/time")
+    def time_status(request: Request) -> dict[str, object]:
+        return get_agent(request).clock.diagnostics()
+
+    @application.get("/v1/verifications", response_model=list[DeferredVerification])
+    def verifications(request: Request, limit: int = 20) -> list[DeferredVerification]:
+        return get_agent(request).repository.list_verifications(limit)
 
     @application.get("/v1/llm", response_model=LLMHealth)
     def llm_health(request: Request) -> LLMHealth:

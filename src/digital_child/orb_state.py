@@ -36,6 +36,7 @@ class OrbDynamics:
             "proud": (203, 220, 127),
             "affectionate": (133, 232, 183),
             "bored": (126, 166, 148),
+            "missing_contact": (102, 185, 211),
         }
         color = palette.get(state.expression, (100, 235, 160))
         fatigue = max(0.0, min(1.0, state.fatigue))
@@ -46,7 +47,9 @@ class OrbDynamics:
             red=float(color[0]),
             green=float(color[1]),
             blue=float(color[2]),
-            speed=(0.12 + state.arousal * 0.55 + thinking * 0.25) * (1 - fatigue * 0.7),
+            speed=(0.12 + state.arousal * 0.55 + thinking * 0.25)
+            * (1 - fatigue * 0.7)
+            * (1 - state.boredom * 0.25),
             turbulence=(
                 0.008
                 + state.confusion * 0.065
@@ -55,9 +58,13 @@ class OrbDynamics:
                 + state.anxiety * 0.02
             )
             * (1 - state.regulation * 0.30),
-            openness=0.2 + state.trust * 0.6,
+            openness=0.2 + state.trust * 0.6 + state.longing * 0.12,
             brightness=0.9 - fatigue * 0.5 + state.valence * 0.08,
-            pulse=0.018 + state.arousal * 0.018 + listening * 0.018 + speech * 0.065,
+            pulse=0.018
+            + state.arousal * 0.018
+            + listening * 0.018
+            + speech * 0.065
+            + state.longing * 0.012,
             coherence=0.3 + state.confidence * 0.6 - state.confusion * 0.2,
             curiosity=state.curiosity,
             speech=speech,

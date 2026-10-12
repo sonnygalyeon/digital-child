@@ -10,6 +10,8 @@ from digital_child.agent import DigitalChildAgent
 from digital_child.behavioral_development import developmental_dynamics
 from digital_child.developmental_age import psychological_age_equivalent
 from digital_child.face_state import FaceState
+from digital_child.interest_catalog import preferred_interests
+from digital_child.models import ConversationMessage
 from digital_child.service import create_agent
 
 
@@ -35,6 +37,8 @@ def desktop_snapshot(agent: DigitalChildAgent) -> dict[str, Any]:
         "loop": agent.cognitive_loop.status.model_dump(mode="json"),
         "needs": [need.model_dump(mode="json") for need in agent.cognitive_loop.needs()],
         "goal": None if active_goal is None else active_goal.title,
+        "time": agent.clock.diagnostics(),
+        "pending_verifications": agent.repository.pending_verification_count(),
         "psychology": {
             "character": psyche.character.model_dump(mode="json"),
             "mood": psyche.mood.model_dump(mode="json"),
@@ -43,6 +47,8 @@ def desktop_snapshot(agent: DigitalChildAgent) -> dict[str, Any]:
             "stage_progress": development.progress,
             "style": None if psyche.last_behavior is None else psyche.last_behavior.style,
             "coping": None if psyche.last_behavior is None else psyche.last_behavior.coping,
+            "interests": [item.topic for item in preferred_interests(psyche, agent.profile, 5)],
+            "initiative_enabled": psyche.initiative_enabled and agent.initiative.settings.enabled,
         },
     }
 
@@ -69,8 +75,12 @@ def run_agent_session(
         agent = create_agent(Path(database_path), auto_research=auto_research)
         router = ChatCommandRouter(agent)
         agent.set_background_notifier(lambda message: send("notice", text=message))
-        if cognitive_loop:
-            agent.start_cognitive_loop()
+
+        def publish_initiative(message: ConversationMessage) -> None:
+            if message.person_id == router.person_id:
+                send("initiative", message=message.model_dump(mode="json"))
+
+        agent.set_initiative_notifier(publish_initiative)
         history = agent.repository.recent_conversation(router.person_id, 100)
         opening = (
             agent.genesis_event.monologue
@@ -83,6 +93,8 @@ def run_agent_session(
             opening=opening,
             history=[item.model_dump(mode="json") for item in history],
         )
+        if cognitive_loop:
+            agent.start_cognitive_loop()
 
         def publish_snapshots() -> None:
             assert agent is not None
@@ -155,5 +167,6 @@ def run_agent_session(
             snapshot_thread.join(timeout=1)
         if agent is not None:
             agent.set_background_notifier(None)
+            agent.set_initiative_notifier(None)
             agent.close()
         connection.close()

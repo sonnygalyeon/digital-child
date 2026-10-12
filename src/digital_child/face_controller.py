@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import multiprocessing
-import os
-import time
 from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
 from typing import Any
 
 from digital_child.face_state import FaceState
@@ -23,7 +22,7 @@ class FaceWindowController:
     def __init__(self, *, title: str = "Digital Child", fps: int = 60) -> None:
         self.title = title
         self.fps = max(24, min(120, fps))
-        self._process: multiprocessing.Process | None = None
+        self._process: BaseProcess | None = None
         self._connection: Connection | None = None
         self._available: bool | None = None
 
