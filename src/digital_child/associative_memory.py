@@ -75,7 +75,7 @@ class AssociativeMemory:
 
     def _labels(self, text: str, semantic: bool) -> list[str]:
         key = sha256(text.encode()).hexdigest()
-        if semantic and key in self._label_cache:
+        if key in self._label_cache:
             return self._label_cache[key]
         labels = concepts(text)
         method = getattr(self.backend, "memory_concepts", None)
@@ -92,6 +92,14 @@ class AssociativeMemory:
             if len(self._label_cache) > 128:
                 self._label_cache.pop(next(iter(self._label_cache)))
         return result_labels
+
+    def seed_labels(self, text: str, labels: list[str]) -> None:
+        if not env_bool("DIGITAL_CHILD_SEMANTIC_MEMORY", True):
+            labels = []
+        key = sha256(text.encode()).hexdigest()
+        self._label_cache[key] = list(dict.fromkeys(concepts(text) + labels))[:20]
+        if len(self._label_cache) > 128:
+            self._label_cache.pop(next(iter(self._label_cache)))
 
     def record(
         self,
@@ -117,7 +125,9 @@ class AssociativeMemory:
             "association", episode.id, self.subject_id, entry.model_dump(mode="json")
         )
 
-    def search(self, text: str, person_id: str, limit: int = 4) -> list[MemoryMatch]:
+    def search(
+        self, text: str, person_id: str, limit: int = 4, *, semantic: bool = True
+    ) -> list[MemoryMatch]:
         if not text.strip():
             return []
         entries = [
@@ -125,7 +135,7 @@ class AssociativeMemory:
             for item in self.repository.list_features("association", self.subject_id, 500)
         ]
         entries = [item for item in entries if item.person_id in (None, person_id)]
-        labels = self._labels(text, semantic=True)
+        labels = self._labels(text, semantic=semantic)
         query = features(text, labels)
         counts = Counter(feature for item in entries for feature in set(item.features))
 

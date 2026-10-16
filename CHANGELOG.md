@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — response latency and inference routing
+
+- Reuse interpretation concepts in memory; remove separate memory inference from the reply path.
+- Adaptive social-message analysis and balanced task-specific model/token/context budgets.
+- Explicit reasoning-model routing, compatibility controls and fast repair generation.
+- Foreground precedence over new background inference; skip review of cancelled initiatives.
+- Bounded connection-failure cooldown, cached model health and role fallback by known availability.
+- Preserve all context sections within the prompt budget and filter legacy thinking prefixes.
+- Per-stage reply timings, actual model metadata and content-free request diagnostics.
+- Add `/inference`, `GET /v1/inference` and documented environment settings.
+- Static checks only; configured model host unavailable for live measurements.
+
 ## Unreleased — associative memory and learning
 
 - Concept-based episodic retrieval with optional budgeted LLM labels and outcome links.

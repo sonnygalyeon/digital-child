@@ -156,6 +156,8 @@ class InitiativeRuntime:
         response = (
             verification[2] if verification is not None else self._generate(context, revision, stop)
         )
+        if not response or self._cancelled(revision, stop):
+            return
         response = agent.reply_guard.finalize(
             RuleBasedBackend() if verification else agent.cognitive_backend, context, response
         ).text

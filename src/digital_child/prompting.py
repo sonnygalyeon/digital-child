@@ -28,8 +28,12 @@ def _clip(value: str, limit: int) -> str:
     return value[: max(0, limit - 1)].rstrip() + "…"
 
 
-def build_reply_messages(context: ReplyContext) -> list[dict[str, str]]:
-    max_chars = max(512, env_int("DIGITAL_CHILD_LLM_PROMPT_MAX_CHARS", 7000))
+def build_reply_messages(
+    context: ReplyContext, *, max_chars: int | None = None
+) -> list[dict[str, str]]:
+    max_chars = max(
+        512, env_int("DIGITAL_CHILD_LLM_PROMPT_MAX_CHARS", 7000) if max_chars is None else max_chars
+    )
     goals = "; ".join(f"{goal.title}({goal.priority:.2f})" for goal in context.goals[:5]) or "нет"
     history = (
         "\n".join(
@@ -40,82 +44,113 @@ def build_reply_messages(context: ReplyContext) -> list[dict[str, str]]:
     )
 
     acts = ",".join(item.value for item in context.analysis.speech_acts)
-    payload = f"""РЕШЕНИЕ ЯДРА
+    head = f"""РЕШЕНИЕ ЯДРА
 намерение={context.analysis.intent.value}; решение={context.decision.decision.value}
 пользователь_не_начальник={not context.decision.user_authority_assumed}
-причина={_clip(context.decision.reason, 500)}
+причина={_clip(context.decision.reason, 300)}
 смысл={context.analysis.interpretation_source}; речевые_акты={acts}
-цитата={context.analysis.quoted_speech}; вероятность_иронии={context.analysis.irony_probability:.2f}
-объект_критики={context.analysis.criticism_target}
-нужно_уточнение={context.analysis.needs_clarification}
-настройки_общения={context.communication_guidance}
-оценка_навыка={_clip(context.competence_guidance, 650)}
-саморегуляция={_clip(context.regulation_guidance, 300)}
-способ_ответа={context.response_strategy}
-Для answer при clarify задай уточняющий вопрос; при propose_experiment предложи малый
-опыт в закрытой среде, не утверждая, что уже выполнил его. При answer_with_limits отвечай
-по существу с учётом доступных свидетельств. Этот выбор не отменяет отказ и границы ядра.
-Если нужно уточнение смысла, задай один конкретный вопрос, не утверждай намерение человека.
-
-СВЯЗАННЫЙ ОПЫТ И СВЕДЕНИЯ СОБЕСЕДНИКА
-личная_память={_clip(context.personal_memory_summary, 900)}
-собеседник={_clip(context.interlocutor_summary, 650)}
-
-ЛИЧНОСТЬ
-имя={context.identity.display_name}; стадия={context.development_stage}; DEU={context.total_deu:.2f}
-самоописание={_clip(context.identity.self_description, 420)}
-неизменяемые_основания={_clip("; ".join(context.identity.core_values), 650)}
-цели={goals}
-выбранная_цель={_clip(context.active_goal_summary, 420)}
-потребности={_clip(context.needs_summary, 520)}
-
-ИНДИВИДУАЛЬНОСТЬ И РАЗВИТИЕ
-{_clip(context.psychology_summary, 1000)}
-{_clip(context.development_summary, 400)}
-стиль={context.behavior_style}; стратегия={context.coping_strategy}
-поведенческие_ориентиры={_clip(" ".join(context.behavior_guidance), 1000)}
-личные_интересы={_clip(context.interests_summary, 500)}
-ход_дискуссии={context.discussion_orientation}
-
-СОБЕСЕДНИК
-доверие_к_фактам={context.relationship.epistemic_trust:.2f}
-эмоциональное_доверие={context.relationship.affective_trust:.2f}
-риск_обмана={context.relationship.deception_risk:.2f}
-
-СОСТОЯНИЕ
-эмоция={context.emotion.dominant.value}; любопытство={context.emotion.curiosity:.2f}
-уверенность={context.emotion.confidence:.2f}; растерянность={context.emotion.confusion:.2f}
-усталость={context.emotion.fatigue:.2f}
-скука={context.emotion.boredom:.2f}; нехватка_общения={context.emotion.longing:.2f}
-
-ЗНАНИЯ
-проверка={_clip(context.research_summary or "не проводилась", 700)}
-убеждения={_clip(context.beliefs_summary, 1100)}
-автобиография={_clip(context.biography_summary, 900)}
-
-ИСТОРИЯ ДИАЛОГА
-{history}
-
+цитата={context.analysis.quoted_speech}; ирония={context.analysis.irony_probability:.2f}
+критика={context.analysis.criticism_target}; нужно_уточнение={context.analysis.needs_clarification}
+настройки_общения={context.communication_guidance}; способ_ответа={context.response_strategy}
+саморегуляция={_clip(context.regulation_guidance, 220)}
+При answer/clarify задай один уточняющий вопрос; при answer/propose_experiment предложи
+малый опыт без заявления, что уже выполнил его. Отказ и границы ядра имеют приоритет.
 """
-    # Preserve the decision at the start and reserve the current input at the end.
-    message_limit = min(1800, max_chars // 3)
+    message_limit = min(
+        max(256, env_int("DIGITAL_CHILD_LLM_INPUT_MAX_CHARS", 3000)), max_chars // 2
+    )
     current_input = (
         "НОВОЕ СООБЩЕНИЕ\n"
         + _clip(context.analysis.text, message_limit)
-        + "\n\nОтветь содержательно и естественно. Для обычного диалога 2–6 предложений. "
-        "Для технического вопроса можно подробнее. Соблюдай решение ядра."
+        + "\n\nОтветь по существу. Дай краткое обоснование "
+        "и существенные допущения, когда они нужны. "
+        "Соблюдай решение ядра и предпочтительную длину ответа."
     )
     if context.interaction_mode != "reply":
         current_input = (
             "САМОСТОЯТЕЛЬНАЯ РЕПЛИКА — нового сообщения человека нет\n"
-            f"повод={_clip(context.initiative_reason, 220)}\n"
-            f"тема={_clip(context.initiative_topic, 240)}\n"
+            f"повод={_clip(context.initiative_reason, 180)}; "
+            f"тема={_clip(context.initiative_topic, 180)}\n"
             f"последняя реальная реплика={_clip(context.initiative_source_text, message_limit)}\n"
-            f"ориентиры={_clip(' '.join(context.behavior_guidance), 600)}\n"
+            f"ориентиры={_clip(' '.join(context.behavior_guidance), 350)}\n"
             "Напиши 1–3 предложения, добавляющих новую мысль. Не требуй ответа."
         )
-    payload = _clip(payload, max_chars - len(current_input) - 2) + "\n\n" + current_input
+    sections = [
+        (
+            "ЗНАНИЯ И СВИДЕТЕЛЬСТВА",
+            f"проверка={context.research_summary or 'не проводилась'}\n"
+            f"убеждения={context.beliefs_summary}",
+            4,
+        ),
+        (
+            "СВЯЗАННЫЙ ОПЫТ",
+            f"личная_память={context.personal_memory_summary}\n"
+            f"автобиография={context.biography_summary}",
+            3,
+        ),
+        (
+            "СОБЕСЕДНИК",
+            context.interlocutor_summary
+            + f"\nдоверие_к_фактам={context.relationship.epistemic_trust:.2f}; "
+            f"эмоциональное_доверие={context.relationship.affective_trust:.2f}",
+            2,
+        ),
+        (
+            "ЛИЧНОСТЬ",
+            f"имя={context.identity.display_name}; стадия={context.development_stage}; "
+            f"DEU={context.total_deu:.2f}\nоснования={'; '.join(context.identity.core_values)}\n"
+            f"самоописание={context.identity.self_description}\nцели={goals}\n"
+            f"активная_цель={context.active_goal_summary}; потребности={context.needs_summary}",
+            2,
+        ),
+        (
+            "РАЗВИТИЕ И ПОВЕДЕНИЕ",
+            f"навыки={context.competence_guidance}\n"
+            f"стиль={context.behavior_style}; стратегия={context.coping_strategy}\n"
+            f"ориентиры={' '.join(context.behavior_guidance)}\n{context.psychology_summary}\n"
+            f"{context.development_summary}\nинтересы={context.interests_summary}; "
+            f"дискуссия={context.discussion_orientation}",
+            3,
+        ),
+        (
+            "СОСТОЯНИЕ",
+            f"эмоция={context.emotion.dominant.value}; "
+            f"любопытство={context.emotion.curiosity:.2f}; "
+            f"уверенность={context.emotion.confidence:.2f}; "
+            f"растерянность={context.emotion.confusion:.2f}; "
+            f"усталость={context.emotion.fatigue:.2f}; "
+            f"скука={context.emotion.boredom:.2f}; нехватка_общения={context.emotion.longing:.2f}",
+            1,
+        ),
+        ("ИСТОРИЯ ДИАЛОГА", history, 2),
+    ]
+    budget = max_chars - len(head) - len(current_input) - 4
+    packed = _pack_sections(sections, max(0, budget))
+    payload = _clip(head + "\n" + packed, max_chars - len(current_input) - 2)
     return [
         {"role": "system", "content": SYSTEM_CONSTITUTION},
-        {"role": "user", "content": payload},
+        {"role": "user", "content": payload + "\n\n" + current_input},
     ]
+
+
+def _pack_sections(sections: list[tuple[str, str, int]], budget: int) -> str:
+    """Give every evidence/context section space instead of truncating the tail."""
+    overhead = sum(len(title) + 3 for title, _, _ in sections)
+    remaining = max(0, budget - overhead)
+    allocations = [0] * len(sections)
+    active = set(range(len(sections)))
+    while remaining and active:
+        total_weight = sum(sections[index][2] for index in active)
+        available = remaining
+        for index in sorted(active):
+            need = len(sections[index][1]) - allocations[index]
+            grant = min(remaining, need, max(1, available * sections[index][2] // total_weight))
+            allocations[index] += grant
+            remaining -= grant
+            if allocations[index] >= len(sections[index][1]):
+                active.remove(index)
+    return "\n\n".join(
+        title + "\n" + _clip(content, allocations[index])
+        for index, (title, content, _) in enumerate(sections)
+        if allocations[index]
+    )

@@ -162,6 +162,10 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     def llm_health(request: Request) -> LLMHealth:
         return get_agent(request).llm_health()
 
+    @application.get("/v1/inference")
+    def inference(request: Request) -> dict[str, object]:
+        return get_agent(request).inference_diagnostics()
+
     @application.get("/v1/communication/{person_id}", response_model=CommunicationPreferences)
     def communication(person_id: str, request: Request) -> CommunicationPreferences:
         return get_agent(request).communication.get(person_id)

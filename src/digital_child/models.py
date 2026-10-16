@@ -454,6 +454,7 @@ class MessageAnalysis(StrictModel):
     criticism_target: str = "unknown"
     needs_clarification: bool = False
     interpretation_source: str = "rules"
+    semantic_concepts: list[str] = Field(default_factory=list, max_length=8)
 
 
 class RelationshipProfile(StrictModel):
@@ -616,6 +617,8 @@ class InteractionResult(StrictModel):
     belief_updates: list[BeliefUpdate] = Field(default_factory=list)
     emotion: EmotionState
     response: str
+    timing_ms: dict[str, float] = Field(default_factory=dict)
+    inference: dict[str, object] = Field(default_factory=dict)
 
 
 class AgentSnapshot(StrictModel):

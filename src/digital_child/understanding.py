@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from typing import Literal
 
@@ -22,6 +23,7 @@ class SituationInterpretation(StrictModel):
     direct_claim: str | None = Field(default=None, max_length=10000)
     contains_pressure: bool = False
     needs_clarification: bool = False
+    concepts: list[str] = Field(default_factory=list, max_length=8)
 
 
 def pragmatic_text(text: str) -> tuple[str, bool]:
@@ -66,6 +68,18 @@ def interpret_message(
     method = getattr(backend, "interpret_message", None)
     if not env_bool("DIGITAL_CHILD_SEMANTIC_ANALYSIS", True) or not callable(method):
         return baseline
+    if baseline.intent == MessageIntent.OPERATOR:
+        return baseline
+    if (
+        os.environ.get("DIGITAL_CHILD_ANALYSIS_MODE", "adaptive").lower() == "adaptive"
+        and baseline.intent == MessageIntent.SOCIAL
+        and baseline.confidence >= 0.9
+        and len(baseline.text.split()) <= 10
+        and not baseline.quoted_speech
+        and baseline.irony_probability < 0.5
+        and not baseline.contains_pressure
+    ):
+        return baseline
     try:
         result = SituationInterpretation.model_validate(method(baseline.text, history))
     except (RuntimeError, ValidationError, ValueError, TypeError, OSError):
@@ -90,5 +104,6 @@ def interpret_message(
             "extracted_claim": claim,
             "needs_clarification": result.needs_clarification,
             "interpretation_source": "semantic",
+            "semantic_concepts": [item[:60] for item in result.concepts],
         }
     )

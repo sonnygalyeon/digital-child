@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pydantic import Field, ValidationError
 
 from digital_child.config import env_bool
+from digital_child.inference import visible_content
 from digital_child.llm import RuleBasedBackend
 from digital_child.llm_types import ReplyContext
 from digital_child.models import StrictModel
@@ -74,6 +75,10 @@ class ReplyGuard:
 
     def _review(self, backend: object, context: ReplyContext, text: str) -> tuple[list[str], bool]:
         issues = local_issues(context, text)
+        if issues:
+            # Repair an already known violation before paying for semantic review.
+            # The resulting candidate still passes both checks before delivery.
+            return issues, False
         method = getattr(backend, "review_reply", None)
         if not env_bool("DIGITAL_CHILD_SEMANTIC_REPLY_REVIEW", True) or not callable(method):
             return issues, False
@@ -86,6 +91,16 @@ class ReplyGuard:
         return issues, True
 
     def finalize(self, backend: object, context: ReplyContext, draft: str) -> GuardedReply:
+        try:
+            draft = visible_content(draft)
+        except RuntimeError:
+            return GuardedReply(
+                self._fallback(context),
+                ("Нет видимого ответа после размышления",),
+                False,
+                False,
+                True,
+            )
         issues, checked = self._review(backend, context, draft)
         original = tuple(issues)
         revised = False

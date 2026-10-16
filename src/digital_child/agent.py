@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from collections.abc import Callable
+from contextlib import nullcontext
 
 from digital_child.associative_memory import AssociativeMemory, concepts
 from digital_child.autobiography import Autobiography
@@ -373,10 +375,12 @@ class DigitalChildAgent:
     ) -> InteractionResult:
         self.initiative.begin_interaction()
         try:
-            with self._interaction_lock:
-                return self._interact(
-                    text, person_id=person_id, force_research=force_research, on_token=on_token
-                )
+            session = getattr(self.cognitive_backend, "foreground_session", None)
+            with session() if callable(session) else nullcontext():
+                with self._interaction_lock:
+                    return self._interact(
+                        text, person_id=person_id, force_research=force_research, on_token=on_token
+                    )
         finally:
             self.initiative.end_interaction()
 
@@ -388,15 +392,22 @@ class DigitalChildAgent:
         force_research: bool = False,
         on_token: Callable[[str], None] | None = None,
     ) -> InteractionResult:
+        started = time.perf_counter()
+        timings: dict[str, float] = {}
         before_development = self._development_state(person_id)
-        associated = self.associative_memory.search(text, person_id)
         analysis = self.intent_classifier.analyze(text)
         from digital_child.config import env_int
 
         conversation_history = self.repository.recent_conversation(
             person_id, env_int("DIGITAL_CHILD_LLM_HISTORY_MESSAGES", 6)
         )
+        analysis_started = time.perf_counter()
         analysis = interpret_message(self.cognitive_backend, analysis, conversation_history)
+        timings["understanding_ms"] = round((time.perf_counter() - analysis_started) * 1000, 2)
+        memory_started = time.perf_counter()
+        self.associative_memory.seed_labels(text, analysis.semantic_concepts)
+        associated = self.associative_memory.search(text, person_id, semantic=False)
+        timings["memory_ms"] = round((time.perf_counter() - memory_started) * 1000, 2)
         feedback = re.search(
             r"слишком часто (?:возвращаешься к|пишешь про|говоришь о)\s+(.+)", text, re.I
         )
@@ -677,12 +688,27 @@ class DigitalChildAgent:
             response_strategy=self._response_strategy(text, analysis.needs_clarification),
         )
         review_backend = self.cognitive_backend
+        generation_started = time.perf_counter()
         try:
             draft = self.cognitive_backend.generate_reply(context).strip()
         except RuntimeError:
             draft = RuleBasedBackend().generate_reply(context)
             review_backend = RuleBasedBackend()
+        timings["generation_ms"] = round((time.perf_counter() - generation_started) * 1000, 2)
+        review_started = time.perf_counter()
         guarded = self.reply_guard.finalize(review_backend, context, draft)
+        timings["review_ms"] = round((time.perf_counter() - review_started) * 1000, 2)
+        inference_method = getattr(self.cognitive_backend, "reply_metadata", None)
+        reply_inference = inference_method() if callable(inference_method) else {}
+        delivered_backend = RuleBasedBackend() if guarded.fallback else review_backend
+        delivered_model = (
+            str(reply_inference.get("model") or delivered_backend.model)
+            if delivered_backend is self.cognitive_backend
+            else delivered_backend.model
+        )
+        reply_inference.update(
+            {"delivered_backend": delivered_backend.name, "delivered_model": delivered_model}
+        )
         response = guarded.text
         if regulation is not None:
             self.regulation.finish(regulation, response)
@@ -693,6 +719,7 @@ class DigitalChildAgent:
             person_id,
             [update.belief.id for update in belief_updates],
             decision=decision.decision.value,
+            semantic=False,
             consequences=[
                 f"Изменение эмоционального доверия: "
                 f"{relationship.affective_trust - affective_before:+.3f}"
@@ -700,6 +727,7 @@ class DigitalChildAgent:
         )
         if research is not None and research.status == ResearchStatus.COMPLETED:
             self.associative_memory.link_report(episode.id, research)
+        timings["delivery_ms"] = round((time.perf_counter() - started) * 1000, 2)
         self.repository.save_audit(
             "reply_review",
             {
@@ -708,9 +736,12 @@ class DigitalChildAgent:
                 "revised": guarded.revised,
                 "semantic_checked": guarded.semantic_checked,
                 "fallback": guarded.fallback,
+                "timing_ms": timings,
+                "inference": reply_inference,
             },
         )
         # Only reviewed text reaches the UI, including the streaming callback.
+        timings["delivery_ms"] = round((time.perf_counter() - started) * 1000, 2)
         if on_token is not None:
             on_token(response)
         self.autobiography.record(
@@ -743,8 +774,8 @@ class DigitalChildAgent:
                 content=response,
                 intent=analysis.intent,
                 decision_id=decision.id,
-                backend=self.cognitive_backend.name,
-                model=self.cognitive_backend.model,
+                backend=delivered_backend.name,
+                model=delivered_model,
                 metadata={
                     "research_status": None if research is None else research.status.value,
                     "emotion": self.emotion.dominant.value,
@@ -759,6 +790,8 @@ class DigitalChildAgent:
                     "response_strategy": context.response_strategy,
                     "regulation_attempt_id": None if regulation is None else regulation.id,
                     "memory_episode_ids": [item.episode.id for item in associated],
+                    "timing_ms": timings,
+                    "inference": reply_inference,
                 },
             )
         )
@@ -785,6 +818,8 @@ class DigitalChildAgent:
             belief_updates=belief_updates,
             emotion=self.emotion,
             response=response,
+            timing_ms=timings,
+            inference=reply_inference,
         )
 
     def set_background_notifier(self, notifier: Callable[[str], None] | None) -> None:
@@ -1327,6 +1362,7 @@ class DigitalChildAgent:
             "version": "0.5.0",
             "database": str(self.repository.database_path),
             "llm": health.model_dump(mode="json"),
+            "inference": self.inference_diagnostics(),
             "cognitive_loop": self.cognitive_loop.status.model_dump(mode="json"),
             "needs": [item.model_dump(mode="json") for item in self.cognitive_loop.needs()],
             "budgets": [
@@ -1351,6 +1387,10 @@ class DigitalChildAgent:
 
     def llm_health(self) -> LLMHealth:
         return self.cognitive_backend.health_check()
+
+    def inference_diagnostics(self) -> dict[str, object]:
+        method = getattr(self.cognitive_backend, "inference_diagnostics", None)
+        return method() if callable(method) else {"backend": self.cognitive_backend.name}
 
     def _needs_summary(self) -> str:
         needs = self.cognitive_loop.needs()
@@ -1389,7 +1429,9 @@ class DigitalChildAgent:
         if not associative:
             return old
         return (
-            self.associative_memory.summary(self.associative_memory.search(text, person_id))
+            self.associative_memory.summary(
+                self.associative_memory.search(text, person_id, semantic=False)
+            )
             + " | "
             + old
         )

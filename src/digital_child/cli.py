@@ -61,6 +61,7 @@ HELP_TEXT = """Команды:
   /state                        развитие, состояние и психологический возраст
   /diagnostics                  сводная диагностика всех подсистем
   /llm                          состояние подключения полноценной LLM
+  /inference                    модели, размышление и время вызовов по задачам
   /history [N]                  сохранённая история диалога
   /identity                     самомодель и вопросы первого пробуждения
   /personality                  темперамент, характер, настроение и самомодель
@@ -134,6 +135,8 @@ class ChatCommandRouter:
         self.person_id = "local-user"
 
     def handle(self, text: str) -> str:
+        if text == "/inference":
+            return json.dumps(self.agent.inference_diagnostics(), ensure_ascii=False, indent=2)
         if text.startswith("/recall "):
             with self.agent._interaction_lock:
                 return self.agent.associative_memory.summary(
