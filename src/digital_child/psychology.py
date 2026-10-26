@@ -7,6 +7,7 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from digital_child.action_plans import ActionAttribution, PlanStep
 from digital_child.appraisal import appraise_situation, clamp, overlap, situation_cue, topic_tokens
 from digital_child.behavior import choose_behavior
 from digital_child.behavioral_development import developmental_dynamics
@@ -703,7 +704,7 @@ class PsychologyEngine:
             )
             confirmed = observation.practical_confirmation * confidence
             rate = developmental_dynamics(profile).plasticity
-            if confirmed > 0.05:
+            if confirmed > 0.05 and episode.action not in {"closed_experiment", "closed_plan_step"}:
                 target = clamp(0.5 + episode.reward * 0.4)
                 self.state.self_model.efficacy += (
                     (target - self.state.self_model.efficacy) * confirmed * rate
@@ -769,53 +770,115 @@ class PsychologyEngine:
                 )
             self._save()
 
-    def integrate_experiment(self, trial: ExperimentTrial, profile: DevelopmentProfile) -> None:
-        with self._lock:
-            key = "experiment:" + trial.id
-            if key in self.state.processed_outcomes:
+    def integrate_experiment(
+        self,
+        trial: ExperimentTrial,
+        profile: DevelopmentProfile,
+        attribution: ActionAttribution | None = None,
+    ) -> None:
+        attribution = attribution or ActionAttribution.from_trial(trial)
+        direction = "positive" if trial.before < 0 else "negative"
+        self._integrate_action(
+            trial.id,
+            attribution,
+            f"experiment:{trial.kind}:{direction}",
+            trial.action,
+            trial.prediction_error,
+            profile,
+        )
+
+    def integrate_plan_step(self, step: PlanStep, profile: DevelopmentProfile) -> None:
+        direction = "positive" if step.target_before > step.before else "negative"
+        self._integrate_action(
+            step.id,
+            step.attribution,
+            f"{step.attribution.kind}:{direction}",
+            step.action,
+            step.prediction_error,
+            profile,
+            recovered=step.recovered_after_failure,
+            corrected=step.corrected_prediction,
+        )
+
+    def _integrate_action(
+        self,
+        outcome_id: str,
+        attribution: ActionAttribution,
+        cue: str,
+        strategy: str,
+        prediction_error: float,
+        profile: DevelopmentProfile,
+        *,
+        recovered: bool = False,
+        corrected: bool = False,
+    ) -> None:
+        with self._lock, self.repository.transaction():
+            if self.repository.load_feature("action_learning", outcome_id, self.state.subject_id):
                 return
-            self.state.processed_outcomes.append(key)
-            dynamics = developmental_dynamics(profile)
-            target = 0.8 if trial.success else 0.3
+            confidence = attribution.confidence
+            effect = max(-1.0, min(1.0, attribution.effect / attribution.step_scale))
+            target = 0.5 + 0.3 * effect
             self.state.self_model.efficacy = clamp(
-                self.state.self_model.efficacy + (target - self.state.self_model.efficacy) * 0.02
+                self.state.self_model.efficacy
+                + (target - self.state.self_model.efficacy) * 0.02 * confidence
             )
             self.state.self_model.accumulated_prediction_error = clamp(
                 self.state.self_model.accumulated_prediction_error * 0.9
-                + min(1.0, trial.prediction_error) * 0.1
+                + min(1.0, prediction_error) * 0.1
             )
-            cue = "experiment:" + trial.kind
             habit = next(
                 (
                     item
                     for item in self.state.habits
-                    if item.cue == cue and item.strategy == trial.action
+                    if item.cue == cue and item.strategy == strategy
                 ),
                 None,
             )
             if habit is None:
-                habit = LearnedHabit(cue=cue, strategy=trial.action)
+                habit = LearnedHabit(cue=cue, strategy=strategy)
                 self.state.habits.append(habit)
             habit.expected_relief += (
-                (1.0 if trial.success else 0.0) - habit.expected_relief
-            ) * 0.15
-            habit.strength = clamp(habit.strength + (0.03 if trial.success else -0.02))
+                (0.5 + effect * 0.5 - habit.expected_relief) * 0.15 * confidence
+            )
+            habit.strength = clamp(habit.strength + effect * 0.04 * confidence)
             habit.reinforcements += 1
             habit.last_sequence = self.repository.current_sequence()
-            for name in ("diligence", "persistence"):
-                current = getattr(self.state.character, name)
+            # Character changes require an observed recovery/correction, not simply
+            # receiving another observation or carrying a positive self-rating.
+            dynamics = developmental_dynamics(profile)
+            for name, demonstrated in (("persistence", recovered), ("diligence", corrected)):
+                if not demonstrated or effect <= 0:
+                    continue
                 origin = getattr(self.state.temperament, name)
-                change = (0.8 - current) * dynamics.plasticity * (0.2 if trial.success else 0.05)
+                current = getattr(self.state.character, name)
                 setattr(
                     self.state.character,
                     name,
-                    clamp(max(origin - 0.18, min(origin + 0.18, current + change))),
+                    clamp(min(origin + 0.18, current + 0.002 * dynamics.plasticity * confidence)),
                 )
             self.state.reflections.append(
-                f"Закрытый эксперимент {trial.kind}: прогноз {trial.predicted_after:g}, "
-                f"наблюдение {trial.actual_after}; модель направления уточнена по результату."
+                f"{attribution.kind}: эффект действия {attribution.effect:+g} относительно "
+                f"контроля, преимущество перед альтернативой "
+                f"{attribution.alternative_advantage:+g}; "
+                f"уверенность {confidence:.2f}, ошибка прогноза {prediction_error:.2f}. "
+                "Вывод относится к закрытой среде."
             )
+            self.state.processed_outcomes.append("action:" + outcome_id)
             self._save()
+            self.repository.save_feature(
+                "action_learning",
+                outcome_id,
+                self.state.subject_id,
+                {
+                    "cue": cue,
+                    "strategy": strategy,
+                    "effect": effect,
+                    "confidence": confidence,
+                    "episode_id": attribution.episode_id,
+                    "recovered": recovered,
+                    "corrected": corrected,
+                },
+            )
 
     def _reinforce_outcome(
         self,

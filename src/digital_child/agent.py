@@ -6,6 +6,13 @@ import time
 from collections.abc import Callable
 from contextlib import nullcontext
 
+from digital_child.action_plans import (
+    ActionAttribution,
+    ActionPlan,
+    PlanEnvironment,
+    PlanKind,
+    PlanStep,
+)
 from digital_child.associative_memory import AssociativeMemory, concepts
 from digital_child.autobiography import Autobiography
 from digital_child.autonomy import AutonomyEngine
@@ -146,7 +153,9 @@ class DigitalChildAgent:
         self.reply_guard = ReplyGuard()
         self.psychology = PsychologyEngine(repository, self.identity, self.profile)
         self.psychology.update_absence(self.profile, self.clock.now())
-        self.emotion = self.emotion_engine.social_idle(self.emotion, self.psychology.snapshot())
+        self.emotion = self.emotion_engine.social_idle(
+            self.emotion, self.psychology.snapshot(), self.clock.now()
+        )
         self._persist_snapshot()
         from digital_child.config import env_float
 
@@ -167,6 +176,7 @@ class DigitalChildAgent:
         self.interlocutors = InterlocutorMemory(self.repository, self.identity.id)
         self.regulation = RegulationLearner(self.repository, self.identity.id)
         self.timeline = DevelopmentTimeline(self.repository, self.identity.id)
+        self.plans = PlanEnvironment(self.repository, self.identity.id)
         self.associative_memory = AssociativeMemory(
             self.repository,
             self.identity.id,
@@ -175,13 +185,7 @@ class DigitalChildAgent:
         )
         # Backfill only attributable observations; legacy conversations lack a
         # reliable per-person link and stay in the existing dialogue memory.
-        for episode in self.repository.recent_episodes(100, include_archived=True):
-            if (
-                episode.action != "conversation"
-                and self.repository.load_feature("association", episode.id, self.identity.id)
-                is None
-            ):
-                self.associative_memory.record(episode, semantic=False)
+        self.associative_memory.backfill(100)
         for trial in reversed(self.experiments.history(100)):
             self.competence.record(
                 "experiment:" + trial.kind,
@@ -202,10 +206,13 @@ class DigitalChildAgent:
             ("value", psyche.values),
             ("mood", psyche.mood.model_dump()),
             ("self", psyche.self_model.model_dump()),
+            ("emotion", self.emotion.model_dump()),
         ):
             for key, value in values.items():
                 if isinstance(value, (int, float)):
                     result[f"{prefix}.{key}"] = round(float(value), 4)
+        result["emotion.dominant"] = self.emotion.dominant.value
+        result["emotion.reason"] = self.emotion.dominant_reason
         for habit in psyche.habits:
             result[f"habit.{habit.cue}.{habit.strategy}"] = round(habit.strength, 4)
         for estimate in self.competence.diagnostics():
@@ -637,6 +644,8 @@ class DigitalChildAgent:
             appraisal=behavior.trace.appraisal,
             development=behavior.development,
             psychology=self.psychology.snapshot(),
+            now=self.clock.now(),
+            episode_id=episode.id,
         )
 
         psyche = self.psychology.snapshot()
@@ -863,6 +872,7 @@ class DigitalChildAgent:
                 self.psychology.snapshot(),
             )
             trial = self.experiments.prepare(kind, self.clock.now(), autonomous)
+            attribution = ActionAttribution.from_trial(trial)
             trial.predicted_success = self.competence.get("experiment:" + kind).confidence
             if choice:
                 trial.selection_reason = choice.reason
@@ -879,7 +889,9 @@ class DigitalChildAgent:
                             content=f"Закрытая среда {kind}, контекст {trial.context}: "
                             f"{trial.before}, "
                             f"действие {trial.action}; "
-                            f"прогноз {trial.predicted_after:g}, результат {trial.actual_after}.",
+                            f"прогноз {trial.predicted_after:g}, результат {trial.actual_after}; "
+                            f"симулированный контроль {attribution.control_after}, "
+                            f"альтернатива {attribution.alternative_after}.",
                             source_kind=SourceKind.ENVIRONMENT,
                             raw_units=4,
                             attention=0.9,
@@ -895,12 +907,28 @@ class DigitalChildAgent:
                             },
                         ),
                         action="closed_experiment",
-                        outcome="success" if trial.success else "prediction_error",
-                        reward=trial.reward,
+                        outcome="progress"
+                        if attribution.effect > 0
+                        else "setback"
+                        if attribution.effect < 0
+                        else "no_effect",
+                        reward=attribution.reward,
                     )
                     trial.episode_id = result.episode_id
+                    attribution.episode_id = result.episode_id
                     self.experiments.save(trial)
-                    self.psychology.integrate_experiment(trial, self.profile)
+                    self.psychology.integrate_experiment(trial, self.profile, attribution)
+                    self.repository.save_feature(
+                        "action_attribution", trial.id, self.identity.id, attribution.diagnostic()
+                    )
+                    self.competence.record(
+                        "control:" + kind,
+                        trial.id,
+                        float(attribution.effect > 0),
+                        self.competence.get("control:" + kind).confidence,
+                    )
+                    self._apply_action_emotion(attribution)
+                    self._persist_snapshot()
                     self.competence.record(
                         "experiment:" + kind,
                         trial.id,
@@ -914,7 +942,7 @@ class DigitalChildAgent:
                         self._development_state(),
                         episode_ids=[] if trial.episode_id is None else [trial.episode_id],
                         now=self.clock.now(),
-                        related_records={"experiment": trial.id},
+                        related_records={"experiment": trial.id, "action_attribution": trial.id},
                     )
                     self.repository.save_budget(budget)
 
@@ -928,10 +956,288 @@ class DigitalChildAgent:
                 raise
             return trial
 
+    def _apply_action_emotion(self, attribution: ActionAttribution) -> None:
+        if self.repository.load_feature(
+            "emotional_outcome", attribution.outcome_id, self.identity.id
+        ):
+            return
+        self.emotion = self.emotion_engine.apply_outcome(
+            self.emotion,
+            attribution.outcome_id,
+            attribution.effect / attribution.step_scale,
+            attribution.confidence,
+            self.clock.now(),
+            attribution.episode_id,
+        )
+        self.repository.save_feature(
+            "emotional_outcome",
+            attribution.outcome_id,
+            self.identity.id,
+            {
+                "episode_id": attribution.episode_id,
+                "effect": attribution.effect,
+                "confidence": attribution.confidence,
+            },
+        )
+
+    def start_plan(
+        self, kind: PlanKind = "route", max_steps: int = 12, *, autonomous: bool = False
+    ) -> ActionPlan:
+        if not autonomous:
+            self.initiative.invalidate()
+        with self._interaction_lock:
+            result: ActionPlan | None = None
+
+            def commit(budget: ResourceBudget) -> None:
+                nonlocal result
+                with self.repository.transaction():
+                    if autonomous and not self.cognitive_loop.budgets.consume("autonomous_plans"):
+                        raise ValueError("Лимит самостоятельных планов исчерпан")
+                    result = self.plans.create(
+                        kind,
+                        self.clock.now(),
+                        max_steps,
+                        autonomous,
+                        self.competence.get("planning:" + kind).confidence,
+                    )
+                    self.timeline.record(
+                        "plan_created",
+                        f"План {kind}: -3 → 2 → 0",
+                        {},
+                        {},
+                        related_records={"action_plan": result.id},
+                        now=self.clock.now(),
+                    )
+                    self.repository.save_budget(budget)
+
+            if (
+                not self.cognitive_loop.budgets.consume_with("action_plans", commit)
+                or result is None
+            ):
+                raise ValueError("Дневной лимит новых планов исчерпан")
+            return result
+
+    def step_plan(self, plan_id: str | None = None, *, autonomous: bool = False) -> PlanStep:
+        if not autonomous:
+            self.initiative.invalidate()
+        with self._interaction_lock:
+            plan = self.plans.get(plan_id) if plan_id else self.plans.active()
+            if plan is None:
+                raise ValueError("Нет активного плана")
+            if self.state.energy < 0.08:
+                raise ValueError("Недостаточно энергии для следующего действия")
+            before = self._development_state()
+            previous = (
+                self.state.model_copy(deep=True),
+                self.profile.model_copy(deep=True),
+                self.emotion.model_copy(deep=True),
+                self.psychology.snapshot(),
+            )
+            updated, step = self.plans.prepare_step(
+                plan, self.clock.now(), self.competence.get("plan_control:" + plan.kind).confidence
+            )
+
+            def commit(budget: ResourceBudget) -> None:
+                with self.repository.transaction():
+                    if autonomous and not self.cognitive_loop.budgets.consume(
+                        "autonomous_plan_steps"
+                    ):
+                        raise ValueError("Лимит самостоятельных шагов исчерпан")
+                    result = self._process_observation(
+                        Observation(
+                            content=f"План {plan.kind}, шаг {step.number}: "
+                            f"состояние {step.before}, "
+                            f"цель {step.target_before}, действие {step.action}; "
+                            f"прогноз {step.predicted_after}, наблюдение {step.actual_after}; "
+                            f"перепланирование {step.replan_reason or 'не требуется'}.",
+                            source_kind=SourceKind.ENVIRONMENT,
+                            raw_units=3,
+                            attention=0.9,
+                            comprehension=0.9,
+                            reliability=1.0,
+                            integration=0.8,
+                            practical_confirmation=1.0,
+                            tags=["closed_plan", plan.kind, step.id],
+                            domains={
+                                DevelopmentDomain.CAUSAL_REASONING: 0.4,
+                                DevelopmentDomain.PLANNING: 0.4,
+                                DevelopmentDomain.METACOGNITION: 0.2,
+                            },
+                        ),
+                        action="closed_plan_step",
+                        outcome="progress" if step.attribution.effect > 0 else "setback",
+                        reward=step.attribution.reward,
+                    )
+                    step.episode_id = result.episode_id
+                    step.attribution.episode_id = result.episode_id
+                    # Pydantic may copy nested models; persist the final episode link explicitly.
+                    updated.steps[-1] = step
+                    self.plans.save(updated, step)
+                    self.psychology.integrate_plan_step(step, self.profile)
+                    self.repository.save_feature(
+                        "action_attribution",
+                        step.id,
+                        self.identity.id,
+                        step.attribution.diagnostic(),
+                    )
+                    self.competence.record(
+                        "plan_control:" + plan.kind,
+                        step.id,
+                        float(step.attribution.effect > 0),
+                        step.expected_success,
+                    )
+                    self.competence.record(
+                        "plan_prediction:" + plan.kind,
+                        step.id,
+                        float(step.prediction_error == 0),
+                        self.competence.get("plan_prediction:" + plan.kind).confidence,
+                    )
+                    if updated.status in {"completed", "exhausted"}:
+                        self.competence.record(
+                            "planning:" + plan.kind,
+                            plan.id,
+                            float(updated.status == "completed"),
+                            plan.expected_completion,
+                        )
+                    self._apply_action_emotion(step.attribution)
+                    self._persist_snapshot()
+                    self.timeline.record(
+                        "plan_step",
+                        f"План {plan.kind}, шаг {step.number}: "
+                        + (step.replan_reason or updated.status),
+                        before,
+                        self._development_state(),
+                        episode_ids=[] if step.episode_id is None else [step.episode_id],
+                        related_records={
+                            "action_plan": plan.id,
+                            "plan_step": step.id,
+                            "action_attribution": step.id,
+                        },
+                        now=self.clock.now(),
+                    )
+                    self.repository.save_budget(budget)
+
+            try:
+                if not self.cognitive_loop.budgets.consume_with("plan_steps", commit):
+                    raise ValueError("Дневной лимит действий исчерпан")
+            except Exception:
+                self.state, self.profile, self.emotion = previous[:3]
+                with self.psychology._lock:
+                    self.psychology.state = previous[3]
+                raise
+            return step
+
+    def run_plan(self, plan_id: str | None = None) -> ActionPlan:
+        with self._interaction_lock:
+            return self._run_plan(plan_id)
+
+    def _run_plan(self, plan_id: str | None = None) -> ActionPlan:
+        plan = self.plans.get(plan_id) if plan_id else self.plans.active()
+        if plan is None:
+            raise ValueError("Нет активного плана")
+        # Each step is its own commit: a budget/energy stop leaves a resumable plan.
+        for _ in range(plan.max_steps - len(plan.steps)):
+            if plan.status != "active":
+                break
+            self.step_plan(plan.id)
+            plan = self.plans.get(plan.id)
+        return plan
+
+    def cancel_plan(self, plan_id: str | None = None) -> ActionPlan:
+        self.initiative.invalidate()
+        with self._interaction_lock:
+            plan = self.plans.get(plan_id) if plan_id else self.plans.active()
+            if plan is None:
+                raise ValueError("Нет активного плана")
+            cancelled = self.plans.cancel(plan.id, self.clock.now())
+            self.timeline.record(
+                "plan_cancelled",
+                "План остановлен пользователем",
+                {},
+                {},
+                related_records={"action_plan": plan.id},
+                now=self.clock.now(),
+            )
+            return cancelled
+
+    def maybe_plan(self) -> None:
+        from digital_child.config import env_bool, env_float
+
+        if not env_bool("DIGITAL_CHILD_AUTO_PLANS", True) or self.state.energy < 0.35:
+            return
+        now = self.clock.now()
+        inputs = self.repository.latest_user_messages(1)
+        last_contact = inputs[0].created_at if inputs else self.clock.launch_at
+        if (now - last_contact).total_seconds() < 300:
+            return
+        active = self.plans.active()
+        if active is not None:
+            if not active.autonomous:
+                return
+            if (now - active.updated_at).total_seconds() >= max(
+                15.0, env_float("DIGITAL_CHILD_PLAN_STEP_SECONDS", 60.0)
+            ):
+                if (
+                    self.cognitive_loop.budgets.get("plan_steps").remaining
+                    and self.cognitive_loop.budgets.get("autonomous_plan_steps").remaining
+                ):
+                    self.step_plan(active.id, autonomous=True)
+            return
+        if (
+            not self.cognitive_loop.budgets.get("action_plans").remaining
+            or not self.cognitive_loop.budgets.get("autonomous_plans").remaining
+        ):
+            return
+        if (
+            self.competence.get("experiment:balance").samples < 2
+            or self.competence.get("experiment:transfer").samples < 2
+        ):
+            return
+        history = self.plans.history(100)
+        if history and (now - history[0].updated_at).total_seconds() < 3600:
+            return
+        kinds: tuple[PlanKind, ...] = ("route", "switchback")
+        for kind in kinds:
+            trials = [item for item in history if item.kind == kind]
+            if len(trials) < 6 and sum(item.status == "completed" for item in trials) < 2:
+                self.start_plan(kind, autonomous=True)
+                break
+
+    def update_idle_emotion(self) -> None:
+        previous = self.emotion
+        self.emotion = self.emotion_engine.social_idle(
+            previous, self.psychology.snapshot(), self.clock.now()
+        )
+        if previous.dominant != self.emotion.dominant:
+            before: dict[str, float | str] = {"emotion.dominant": previous.dominant.value}
+            after: dict[str, float | str] = {
+                "emotion.dominant": self.emotion.dominant.value,
+                "emotion.reason": self.emotion.dominant_reason,
+            }
+            for key, value in previous.model_dump().items():
+                if isinstance(value, (int, float)):
+                    before["emotion." + key] = round(float(value), 4)
+                    after["emotion." + key] = round(float(getattr(self.emotion, key)), 4)
+            self.timeline.record(
+                "emotion_transition",
+                self.emotion.dominant_reason,
+                before,
+                after,
+                now=self.clock.now(),
+                episode_ids=[]
+                if self.emotion.dominant_episode_id is None
+                else [self.emotion.dominant_episode_id],
+            )
+        self._persist_snapshot()
+
     def maybe_experiment(self) -> None:
         from digital_child.config import env_bool
 
-        if not env_bool("DIGITAL_CHILD_AUTO_EXPERIMENTS", True) or self.state.energy < 0.35:
+        if (
+            not env_bool("DIGITAL_CHILD_AUTO_EXPERIMENTS", True)
+            or self.state.energy < 0.35
+            or self.plans.active() is not None
+        ):
             return
         now = self.clock.now()
         inputs = self.repository.latest_user_messages(1)
@@ -1155,7 +1461,9 @@ class DigitalChildAgent:
             update={"fatigue": clamp_probability(1.0 - self.state.energy)}
         )
         self.psychology.rest(amount, self.profile)
-        self.emotion = self.emotion_engine.idle_decay(self.emotion, amount=amount * 0.3)
+        self.emotion = self.emotion_engine.idle_decay(
+            self.emotion, amount=amount * 0.3, now=self.clock.now()
+        )
         self._persist_snapshot()
         self.timeline.record(
             "recovery",
@@ -1358,11 +1666,14 @@ class DigitalChildAgent:
 
     def diagnostics(self) -> dict[str, object]:
         health = self.llm_health()
+        action_plan = self.plans.active()
         return {
             "version": "0.5.0",
             "database": str(self.repository.database_path),
             "llm": health.model_dump(mode="json"),
             "inference": self.inference_diagnostics(),
+            "memory_index": self.associative_memory.index_status(),
+            "action_plan": None if action_plan is None else action_plan.model_dump(mode="json"),
             "cognitive_loop": self.cognitive_loop.status.model_dump(mode="json"),
             "needs": [item.model_dump(mode="json") for item in self.cognitive_loop.needs()],
             "budgets": [

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — offline emotion dynamics and action plans
+
+- Time-based emotional decay, persistent transition causes and dominant-state hysteresis.
+- Remove conversation-driven pride; reinforce it from bounded observed action outcomes.
+- Persistent route/switchback plans with per-step prediction, feedback, replanning and restart recovery.
+- Controlled causal attribution against no-op/opposite actions, including matched-noise controls.
+- Separate prediction/control/planning competence; condition habit and character changes on outcomes.
+- Indexed archive-wide episodic retrieval with person filtering and incremental legacy backfill.
+- CLI/API plan, action-attribution and memory-index controls; Qt plan progress and timeline links.
+- Static validation only; tests and LLM execution omitted as requested.
+
 ## Unreleased — response latency and inference routing
 
 - Reuse interpretation concepts in memory; remove separate memory inference from the reply path.

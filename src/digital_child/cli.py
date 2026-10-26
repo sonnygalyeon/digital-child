@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import uvicorn
 
+from digital_child.action_plans import PlanKind
 from digital_child.console import configure_utf8_console
 from digital_child.developmental_age import psychological_age_equivalent
 from digital_child.experiments import EXPERIMENT_KINDS, Demonstration
@@ -80,6 +81,14 @@ HELP_TEXT = """Команды:
   /verifications                отложенные проверки фактов и их результаты
   /experiment [balance|transfer] закрытый эксперимент; без аргумента — история
   /experiment noise|conditional|reversal  среды с шумом, контекстом и сменой правил
+  /plan                         активный многошаговый план и история
+  /plan start route|switchback [N]  создать план с пределом N действий (по умолчанию 12)
+  /plan step [ID]                выполнить следующее действие
+  /plan run [ID]                 выполнить оставшиеся шаги в пределах бюджетов
+  /plan cancel [ID]              остановить план
+  /plan show ID                  полный план с результатами и объяснениями шагов
+  /action-outcomes               причинные эффекты наблюдаемых действий
+  /memory-index [N]              состояние индекса; N — просканировать следующую порцию
   /recall ТЕКСТ                  поиск связанного опыта по смыслу
   /competence                    наблюдаемые навыки и уверенность в них
   /curriculum                    пробелы и предлагаемые эксперименты
@@ -135,6 +144,64 @@ class ChatCommandRouter:
         self.person_id = "local-user"
 
     def handle(self, text: str) -> str:
+        if text == "/memory-index":
+            return json.dumps(
+                self.agent.associative_memory.index_status(), ensure_ascii=False, indent=2
+            )
+        if text.startswith("/memory-index "):
+            try:
+                batch = int(text.split(maxsplit=1)[1])
+                if not 1 <= batch <= 2000:
+                    raise ValueError("Размер порции: от 1 до 2000")
+                with self.agent._interaction_lock:
+                    status = self.agent.associative_memory.backfill(batch)
+                return json.dumps(status, ensure_ascii=False, indent=2)
+            except ValueError as exc:
+                return str(exc)
+        if text == "/action-outcomes":
+            return json.dumps(
+                self.agent.repository.list_features(
+                    "action_attribution", self.agent.identity.id, 20
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        if text == "/plan":
+            active_plan = self.agent.plans.active()
+            return json.dumps(
+                {
+                    "active": None if active_plan is None else active_plan.model_dump(mode="json"),
+                    "recent": [
+                        item.model_dump(mode="json") for item in self.agent.plans.history(5)
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        if text.startswith("/plan "):
+            parts = text.split()
+            try:
+                if (
+                    len(parts) in {3, 4}
+                    and parts[1] == "start"
+                    and parts[2] in {"route", "switchback"}
+                ):
+                    kind: PlanKind = "route" if parts[2] == "route" else "switchback"
+                    return self.agent.start_plan(
+                        kind, int(parts[3]) if len(parts) == 4 else 12
+                    ).model_dump_json(indent=2)
+                if len(parts) in {2, 3} and parts[1] in {"step", "run", "cancel"}:
+                    plan_id = parts[2] if len(parts) == 3 else None
+                    if parts[1] == "step":
+                        return self.agent.step_plan(plan_id).model_dump_json(indent=2)
+                    if parts[1] == "run":
+                        return self.agent.run_plan(plan_id).model_dump_json(indent=2)
+                    return self.agent.cancel_plan(plan_id).model_dump_json(indent=2)
+                if len(parts) == 3 and parts[1] == "show":
+                    return self.agent.plans.get(parts[2]).model_dump_json(indent=2)
+                return "Используйте /plan start route|switchback [N], step, run, cancel или show ID"
+            except ValueError as exc:
+                return str(exc)
         if text == "/inference":
             return json.dumps(self.agent.inference_diagnostics(), ensure_ascii=False, indent=2)
         if text.startswith("/recall "):

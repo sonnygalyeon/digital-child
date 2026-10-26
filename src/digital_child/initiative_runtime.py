@@ -114,14 +114,14 @@ class InitiativeRuntime:
                 return
             now = agent.clock.now()
             agent.maybe_regulate()
+            agent.associative_memory.backfill(100)
+            agent.maybe_plan()
             agent.maybe_experiment()
             inputs = agent.repository.latest_user_messages()
             agent.psychology.sync_contacts(inputs)
-            changed = agent.psychology.update_absence(agent.profile, now)
+            agent.psychology.update_absence(agent.profile, now)
             psyche = agent.psychology.snapshot()
-            if changed:
-                agent.emotion = agent.emotion_engine.social_idle(agent.emotion, psyche)
-                agent._persist_snapshot()
+            agent.update_idle_emotion()
             verification = self._verification_notice(inputs)
             plan = None if verification is None else verification[0]
             if plan is None:

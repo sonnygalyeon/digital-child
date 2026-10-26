@@ -549,6 +549,15 @@ class EmotionState(StrictModel):
     boredom: Probability = 0.0
     longing: Probability = 0.0
     regulation: Probability = 0.15
+    updated_at: datetime | None = None
+    dominant_since: datetime | None = None
+    dominant_reason: str = "initial_state"
+    dominant_episode_id: str | None = None
+    pending_dominant: EmotionName | None = None
+    pending_since: datetime | None = None
+    pending_reason: str = ""
+    pending_episode_id: str | None = None
+    last_achievement_id: str | None = None
 
 
 class ConversationMessage(StrictModel):

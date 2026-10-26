@@ -18,6 +18,7 @@ from digital_child.service import create_agent
 def desktop_snapshot(agent: DigitalChildAgent, person_id: str = "local-user") -> dict[str, Any]:
     psyche = agent.psychology.snapshot()
     development = developmental_dynamics(agent.profile)
+    action_plan = agent.plans.active()
     active_goal = next(
         (
             goal
@@ -39,6 +40,17 @@ def desktop_snapshot(agent: DigitalChildAgent, person_id: str = "local-user") ->
         "loop": agent.cognitive_loop.status.model_dump(mode="json"),
         "needs": [need.model_dump(mode="json") for need in agent.cognitive_loop.needs()],
         "goal": None if active_goal is None else active_goal.title,
+        "action_plan": None
+        if action_plan is None
+        else {
+            "id": action_plan.id,
+            "kind": action_plan.kind,
+            "position": action_plan.position,
+            "target": action_plan.waypoints[action_plan.waypoint_index],
+            "steps": len(action_plan.steps),
+            "max_steps": action_plan.max_steps,
+            "autonomous": action_plan.autonomous,
+        },
         "time": agent.clock.diagnostics(),
         "pending_verifications": agent.repository.pending_verification_count(),
         "timeline": [

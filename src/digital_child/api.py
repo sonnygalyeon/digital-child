@@ -10,6 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from digital_child import __version__
+from digital_child.action_plans import ActionPlan, PlanKind, PlanStep
 from digital_child.agent import DigitalChildAgent
 from digital_child.autobiography import BiographyChapter
 from digital_child.communication import CommunicationPreferences
@@ -55,6 +56,16 @@ class BiographyCorrection(BaseModel):
 
 class ExperimentRequest(BaseModel):
     kind: ExperimentKind = "balance"
+
+
+class PlanRequest(BaseModel):
+    kind: PlanKind = "route"
+    max_steps: int = Field(default=12, ge=2, le=20)
+    autonomous: bool = False
+
+
+class MemoryBackfillRequest(BaseModel):
+    batch_size: int = Field(default=100, ge=1, le=2000)
 
 
 class InteractionRequest(BaseModel):
@@ -237,6 +248,80 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     @application.get("/v1/competence")
     def competence(request: Request) -> object:
         return get_agent(request).competence.diagnostics()
+
+    @application.get("/v1/memory-index")
+    def memory_index(request: Request) -> dict[str, int]:
+        return get_agent(request).associative_memory.index_status()
+
+    @application.post("/v1/memory-index/backfill", dependencies=[Depends(require_operator)])
+    def backfill_memory(payload: MemoryBackfillRequest, request: Request) -> dict[str, int]:
+        agent = get_agent(request)
+        with agent._interaction_lock:
+            return agent.associative_memory.backfill(payload.batch_size)
+
+    @application.get("/v1/plans", response_model=list[ActionPlan])
+    def plans(request: Request, limit: int = 20) -> list[ActionPlan]:
+        return get_agent(request).plans.history(limit)
+
+    @application.get("/v1/plans/active", response_model=ActionPlan | None)
+    def active_plan(request: Request) -> ActionPlan | None:
+        return get_agent(request).plans.active()
+
+    @application.get("/v1/plans/{plan_id}", response_model=ActionPlan)
+    def get_plan(plan_id: str, request: Request) -> ActionPlan:
+        try:
+            return get_agent(request).plans.get(plan_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @application.post(
+        "/v1/plans", response_model=ActionPlan, dependencies=[Depends(require_operator)]
+    )
+    def start_plan(payload: PlanRequest, request: Request) -> ActionPlan:
+        try:
+            return get_agent(request).start_plan(
+                payload.kind, payload.max_steps, autonomous=payload.autonomous
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.post(
+        "/v1/plans/{plan_id}/step",
+        response_model=PlanStep,
+        dependencies=[Depends(require_operator)],
+    )
+    def step_plan(plan_id: str, request: Request) -> PlanStep:
+        try:
+            return get_agent(request).step_plan(plan_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.post(
+        "/v1/plans/{plan_id}/run",
+        response_model=ActionPlan,
+        dependencies=[Depends(require_operator)],
+    )
+    def run_plan(plan_id: str, request: Request) -> ActionPlan:
+        try:
+            return get_agent(request).run_plan(plan_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.post(
+        "/v1/plans/{plan_id}/cancel",
+        response_model=ActionPlan,
+        dependencies=[Depends(require_operator)],
+    )
+    def cancel_plan(plan_id: str, request: Request) -> ActionPlan:
+        try:
+            return get_agent(request).cancel_plan(plan_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.get("/v1/action-outcomes")
+    def action_outcomes(request: Request, limit: int = 20) -> list[dict[str, object]]:
+        agent = get_agent(request)
+        return agent.repository.list_features("action_attribution", agent.identity.id, limit)
 
     @application.get("/v1/curriculum")
     def curriculum(request: Request) -> object:

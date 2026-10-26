@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import re
-from collections import Counter
 from collections.abc import Callable
 from hashlib import sha256
 
@@ -130,34 +129,30 @@ class AssociativeMemory:
     ) -> list[MemoryMatch]:
         if not text.strip():
             return []
-        entries = [
-            MemoryAssociation.model_validate(item)
-            for item in self.repository.list_features("association", self.subject_id, 500)
-        ]
-        entries = [item for item in entries if item.person_id in (None, person_id)]
         labels = self._labels(text, semantic=semantic)
         query = features(text, labels)
-        counts = Counter(feature for item in entries for feature in set(item.features))
-
-        def weight(feature: str) -> float:
-            return (2.5 if feature.startswith("concept:") else 1.0) * (
-                1 + math.log((1 + len(entries)) / (1 + counts[feature]))
-            )
-
-        def norm(values: set[str]) -> float:
-            return math.sqrt(sum(weight(value) ** 2 for value in values)) or 1.0
-
+        total, counts = self.repository.association_term_counts(
+            self.subject_id, person_id, sorted(query)
+        )
+        weights = {
+            term: (2.5 if term.startswith("concept:") else 1.0)
+            * (1 + math.log((1 + total) / (1 + count)))
+            for term, count in counts.items()
+            if count > 0
+        }
+        # Bound the candidate set, not the age of memories. Rare indexed terms can
+        # retrieve an arbitrarily old episode, including an archived one.
+        weights = dict(sorted(weights.items(), key=lambda item: item[1], reverse=True)[:128])
+        denominator = sum(weights.values()) or 1.0
         matches = []
-        for item in entries:
-            shared = query & set(item.features)
-            if not shared:
-                continue
-            episode = self.repository.get_episode(item.episode_id)
-            if episode is None:
-                continue
-            score = sum(weight(value) ** 2 for value in shared) / (
-                norm(query) * norm(set(item.features))
-            )
+        for payload, episode in self.repository.association_candidates(
+            self.subject_id, person_id, weights
+        ):
+            item = MemoryAssociation.model_validate(payload)
+            shared = set(weights) & set(item.features)
+            coverage = sum(weights[term] for term in shared) / denominator
+            length = min(1.0, math.sqrt((len(query) + 4) / (len(item.features) + 4)))
+            score = coverage * (0.5 + 0.5 * length)
             score *= (0.7 + 0.3 * episode.importance) * (0.6 if episode.archived else 1.0)
             if score >= 0.06:
                 matches.append(
@@ -173,6 +168,47 @@ class AssociativeMemory:
         return sorted(matches, key=lambda item: (item.score, item.episode.sequence), reverse=True)[
             : max(1, min(limit, 20))
         ]
+
+    def backfill(self, batch_size: int = 100) -> dict[str, int]:
+        with self.repository.transaction():
+            saved = (
+                self.repository.load_feature("association_scan", "cursor", self.subject_id) or {}
+            )
+            sequence = int(str(saved.get("sequence", 0)))
+            skipped = int(str(saved.get("unattributed_conversations", 0)))
+            indexed = 0
+            for episode in self.repository.episodes_after(sequence, batch_size):
+                if self.repository.load_feature("association", episode.id, self.subject_id) is None:
+                    owner = episode.metadata.get("person_id")
+                    if episode.action != "conversation" or isinstance(owner, str):
+                        self.record(
+                            episode, owner if isinstance(owner, str) else None, semantic=False
+                        )
+                        indexed += 1
+                    else:
+                        # Never expose an unattributed private conversation as global memory.
+                        skipped += 1
+                sequence = episode.sequence
+            self.repository.save_feature(
+                "association_scan",
+                "cursor",
+                self.subject_id,
+                {"sequence": sequence, "unattributed_conversations": skipped},
+            )
+        return {
+            **self.repository.association_index_status(self.subject_id, sequence),
+            "indexed_now": indexed,
+            "unattributed_conversations": skipped,
+        }
+
+    def index_status(self) -> dict[str, int]:
+        saved = self.repository.load_feature("association_scan", "cursor", self.subject_id) or {}
+        return {
+            **self.repository.association_index_status(
+                self.subject_id, int(str(saved.get("sequence", 0)))
+            ),
+            "unattributed_conversations": int(str(saved.get("unattributed_conversations", 0))),
+        }
 
     @staticmethod
     def summary(matches: list[MemoryMatch]) -> str:

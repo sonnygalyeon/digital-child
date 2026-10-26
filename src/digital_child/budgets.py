@@ -19,6 +19,10 @@ class BudgetManager:
         "autonomous_experiments": ("DIGITAL_CHILD_MAX_AUTO_EXPERIMENTS_PER_DAY", 2),
         "memory_analysis": ("DIGITAL_CHILD_MAX_MEMORY_ANALYSES_PER_DAY", 20),
         "regulated_rest": ("DIGITAL_CHILD_MAX_REGULATED_RESTS_PER_DAY", 4),
+        "action_plans": ("DIGITAL_CHILD_MAX_PLANS_PER_DAY", 4),
+        "plan_steps": ("DIGITAL_CHILD_MAX_PLAN_STEPS_PER_DAY", 32),
+        "autonomous_plans": ("DIGITAL_CHILD_MAX_AUTO_PLANS_PER_DAY", 1),
+        "autonomous_plan_steps": ("DIGITAL_CHILD_MAX_AUTO_PLAN_STEPS_PER_DAY", 8),
     }
 
     def __init__(
@@ -48,6 +52,10 @@ class BudgetManager:
                 "autonomous_experiments",
                 "memory_analysis",
                 "regulated_rest",
+                "action_plans",
+                "plan_steps",
+                "autonomous_plans",
+                "autonomous_plan_steps",
             }
             else 1,
             env_int(env_name, default),

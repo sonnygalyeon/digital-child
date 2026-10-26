@@ -361,6 +361,8 @@ class DesktopWindow(QMainWindow):
         development_layout.addWidget(self.skills_label)
         self.curriculum_label = _label("", "muted", wrap=True)
         development_layout.addWidget(self.curriculum_label)
+        self.plan_label = _label("", "muted", wrap=True)
+        development_layout.addWidget(self.plan_label)
         self.timeline_tree = QTreeWidget()
         self.timeline_tree.setHeaderLabels(["Событие (UTC) / изменение", "Результат"])
         self.timeline_tree.setColumnWidth(0, 230)
@@ -725,6 +727,13 @@ class DesktopWindow(QMainWindow):
         self._add_card(card)
 
     def _apply_snapshot(self, snapshot: dict[str, Any]) -> None:
+        action_plan = snapshot.get("action_plan")
+        self.plan_label.setText(
+            f"План {action_plan['kind']}: шагов {action_plan['steps']}/{action_plan['max_steps']}, "
+            f"состояние {action_plan['position']}, следующая цель {action_plan['target']}"
+            if action_plan
+            else "Активного плана действий нет. /plan — управление планами."
+        )
         self._apply_timeline(snapshot.get("timeline", []))
         skills = snapshot.get("competence", [])
         self.skills_label.setText(

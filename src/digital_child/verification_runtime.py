@@ -72,10 +72,7 @@ class VerificationRuntime:
                     return
                 agent.clock.checkpoint()
                 agent.psychology.update_absence(agent.profile, agent.clock.now())
-                agent.emotion = agent.emotion_engine.social_idle(
-                    agent.emotion, agent.psychology.snapshot()
-                )
-                agent._persist_snapshot()
+                agent.update_idle_emotion()
 
         if not agent._interaction_lock.acquire(blocking=False):
             return

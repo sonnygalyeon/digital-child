@@ -244,6 +244,49 @@ class SQLiteRepository:
                 )"""
             )
             self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_feature_subject "
+                "ON feature_records(kind, subject_id)"
+            )
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_episode_sequence ON episodes(sequence)"
+            )
+            self.connection.execute(
+                """CREATE TABLE IF NOT EXISTS association_documents (
+                    subject_id TEXT NOT NULL, episode_id TEXT NOT NULL, person_id TEXT,
+                    feature_count INTEGER NOT NULL, PRIMARY KEY(subject_id, episode_id),
+                    FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+                )"""
+            )
+            self.connection.execute(
+                """CREATE TABLE IF NOT EXISTS association_terms (
+                    subject_id TEXT NOT NULL, episode_id TEXT NOT NULL, term TEXT NOT NULL,
+                    PRIMARY KEY(subject_id, episode_id, term),
+                    FOREIGN KEY(subject_id, episode_id)
+                    REFERENCES association_documents(subject_id, episode_id) ON DELETE CASCADE
+                )"""
+            )
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_association_terms "
+                "ON association_terms(subject_id, term, episode_id)"
+            )
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_association_people "
+                "ON association_documents(subject_id, person_id)"
+            )
+            if not self.connection.execute(
+                "SELECT 1 FROM runtime_state WHERE name = 'association_postings_v1'"
+            ).fetchone():
+                cursor = self.connection.execute(
+                    "SELECT id, subject_id, payload_json FROM feature_records "
+                    "WHERE kind = 'association'"
+                )
+                while rows := cursor.fetchmany(200):
+                    for row in rows:
+                        self._index_association(
+                            row["id"], row["subject_id"], json.loads(row["payload_json"])
+                        )
+                self.save_runtime_state("association_postings_v1", {"complete": True})
+            self.connection.execute(
                 """CREATE TABLE IF NOT EXISTS deferred_verifications (
                     id TEXT PRIMARY KEY, source_message_id TEXT UNIQUE NOT NULL,
                     completed INTEGER NOT NULL, notified INTEGER NOT NULL,
@@ -1061,6 +1104,128 @@ class SQLiteRepository:
                 subject_id = excluded.subject_id, payload_json = excluded.payload_json""",
                 (kind, record_id, subject_id, json.dumps(payload, ensure_ascii=False)),
             )
+            if kind == "association":
+                self._index_association(record_id, subject_id, payload)
+
+    def _index_association(
+        self, episode_id: str, subject_id: str, payload: dict[str, object]
+    ) -> None:
+        episode = self.connection.execute(
+            "SELECT action FROM episodes WHERE id = ?", (episode_id,)
+        ).fetchone()
+        if episode is None:
+            return
+        person_id = payload.get("person_id")
+        if person_id is not None and not isinstance(person_id, str):
+            raise ValueError("Некорректный владелец ассоциативной памяти")
+        if episode["action"] == "conversation" and person_id is None:
+            self.connection.execute(
+                "DELETE FROM association_documents WHERE subject_id = ? AND episode_id = ?",
+                (subject_id, episode_id),
+            )
+            return
+        raw = payload.get("features", [])
+        terms = {item for item in raw if isinstance(item, str)} if isinstance(raw, list) else set()
+        self.connection.execute(
+            """INSERT INTO association_documents VALUES (?, ?, ?, ?)
+            ON CONFLICT(subject_id, episode_id) DO UPDATE SET
+            person_id = excluded.person_id, feature_count = excluded.feature_count""",
+            (subject_id, episode_id, person_id, len(terms)),
+        )
+        self.connection.execute(
+            "DELETE FROM association_terms WHERE subject_id = ? AND episode_id = ?",
+            (subject_id, episode_id),
+        )
+        self.connection.executemany(
+            "INSERT INTO association_terms VALUES (?, ?, ?)",
+            [(subject_id, episode_id, term) for term in terms],
+        )
+
+    def association_term_counts(
+        self, subject_id: str, person_id: str, terms: list[str]
+    ) -> tuple[int, dict[str, int]]:
+        with self._lock:
+            total = int(
+                self.connection.execute(
+                    "SELECT COUNT(*) FROM association_documents WHERE subject_id = ? "
+                    "AND (person_id IS NULL OR person_id = ?)",
+                    (subject_id, person_id),
+                ).fetchone()[0]
+            )
+            counts: dict[str, int] = {}
+            for start in range(0, len(terms), 256):
+                batch = terms[start : start + 256]
+                placeholders = ",".join("?" for _ in batch)
+                rows = self.connection.execute(
+                    "SELECT t.term, COUNT(*) AS n FROM association_terms t "
+                    "JOIN association_documents d USING(subject_id, episode_id) "
+                    f"WHERE t.subject_id = ? AND t.term IN ({placeholders}) "
+                    "AND (d.person_id IS NULL OR d.person_id = ?) GROUP BY t.term",
+                    [subject_id, *batch, person_id],
+                ).fetchall()
+                counts.update({row["term"]: int(row["n"]) for row in rows})
+        return total, counts
+
+    def association_candidates(
+        self, subject_id: str, person_id: str, weights: dict[str, float], limit: int = 200
+    ) -> list[tuple[dict[str, object], Episode]]:
+        if not weights:
+            return []
+        items = sorted(weights.items(), key=lambda item: item[1], reverse=True)[:128]
+        requested = ",".join("(?, ?)" for _ in items)
+        parameters: list[str | float | int] = [value for pair in items for value in pair]
+        parameters += [subject_id, person_id, max(1, min(limit, 1000))]
+        with self._lock:
+            rows = self.connection.execute(
+                f"WITH requested(term, weight) AS (VALUES {requested}) "
+                "SELECT e.*, f.payload_json FROM requested q "
+                "JOIN association_terms t ON t.term = q.term "
+                "JOIN association_documents d USING(subject_id, episode_id) "
+                "JOIN episodes e ON e.id = d.episode_id "
+                "JOIN feature_records f ON f.kind = 'association' AND f.id = d.episode_id "
+                "AND f.subject_id = d.subject_id "
+                "WHERE t.subject_id = ? AND (d.person_id IS NULL OR d.person_id = ?) "
+                "GROUP BY d.episode_id "
+                "ORDER BY SUM(q.weight) / (1 + d.feature_count * 0.03) "
+                "* (0.7 + 0.3 * e.importance) * CASE WHEN e.archived = 1 THEN 0.6 ELSE 1 END DESC, "
+                "e.sequence DESC LIMIT ?",
+                parameters,
+            ).fetchall()
+        return [
+            (dict(json.loads(row["payload_json"])), self._episode_from_row(row)) for row in rows
+        ]
+
+    def episodes_after(self, sequence: int, limit: int = 100) -> list[Episode]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT * FROM episodes WHERE sequence > ? ORDER BY sequence ASC LIMIT ?",
+                (sequence, max(1, min(limit, 2000))),
+            ).fetchall()
+        return [self._episode_from_row(row) for row in rows]
+
+    def association_index_status(self, subject_id: str, sequence: int = 0) -> dict[str, int]:
+        with self._lock:
+            documents = int(
+                self.connection.execute(
+                    "SELECT COUNT(*) FROM association_documents WHERE subject_id = ?", (subject_id,)
+                ).fetchone()[0]
+            )
+            terms = int(
+                self.connection.execute(
+                    "SELECT COUNT(*) FROM association_terms WHERE subject_id = ?", (subject_id,)
+                ).fetchone()[0]
+            )
+            pending = int(
+                self.connection.execute(
+                    "SELECT COUNT(*) FROM episodes WHERE sequence > ?", (sequence,)
+                ).fetchone()[0]
+            )
+        return {
+            "documents": documents,
+            "postings": terms,
+            "scan_sequence": sequence,
+            "pending_scan": pending,
+        }
 
     def load_feature(self, kind: str, record_id: str, subject_id: str) -> dict[str, object] | None:
         with self._lock:
@@ -1418,6 +1583,8 @@ class SQLiteRepository:
     def reset(self) -> None:
         with self.transaction():
             for table in (
+                "association_terms",
+                "association_documents",
                 "feature_records",
                 "deferred_verifications",
                 "psychology_state",
