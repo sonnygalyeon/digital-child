@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 
-def load_dotenv(path: str | Path = ".env") -> None:
+def load_dotenv(path: str | Path | None = None) -> None:
     """Load a minimal KEY=VALUE .env file without adding a runtime dependency."""
-    env_path = Path(path)
+    if path is None:
+        home = os.environ.get("DIGITAL_CHILD_HOME")
+        env_path = Path(home) / ".env" if getattr(sys, "frozen", False) and home else Path(".env")
+    else:
+        env_path = Path(path)
     if not env_path.exists():
         return
     for raw_line in env_path.read_text(encoding="utf-8-sig").splitlines():

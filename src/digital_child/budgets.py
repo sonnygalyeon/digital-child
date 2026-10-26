@@ -23,6 +23,9 @@ class BudgetManager:
         "plan_steps": ("DIGITAL_CHILD_MAX_PLAN_STEPS_PER_DAY", 32),
         "autonomous_plans": ("DIGITAL_CHILD_MAX_AUTO_PLANS_PER_DAY", 1),
         "autonomous_plan_steps": ("DIGITAL_CHILD_MAX_AUTO_PLAN_STEPS_PER_DAY", 8),
+        "personal_projects": ("DIGITAL_CHILD_MAX_PROJECTS_PER_DAY", 4),
+        "project_steps": ("DIGITAL_CHILD_MAX_PROJECT_STEPS_PER_DAY", 24),
+        "autonomous_project_steps": ("DIGITAL_CHILD_MAX_AUTO_PROJECT_STEPS_PER_DAY", 3),
     }
 
     def __init__(
@@ -56,6 +59,9 @@ class BudgetManager:
                 "plan_steps",
                 "autonomous_plans",
                 "autonomous_plan_steps",
+                "personal_projects",
+                "project_steps",
+                "autonomous_project_steps",
             }
             else 1,
             env_int(env_name, default),

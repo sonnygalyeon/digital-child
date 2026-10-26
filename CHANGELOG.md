@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — Windows packaging and goal-linked projects
+
+- Add a Windows PyInstaller folder bundle, archive/hash script and manual build workflow.
+- Keep frozen-app settings, SQLite and logs in a separate persistent user directory.
+- Dispatch spawned workers before Qt imports; log startup failures in parent and worker.
+- Link selected self-generated goals to explicit proposed memory-dossier plans.
+- Add bounded local memory search, immutable note creation and hash-verified readback.
+- Persist prepared step arguments, observed outcomes, forecasts and explicit bounded retries.
+- Add per-project background opt-in, daily budgets, pause/resume, revisions and milestones.
+- Expose project commands, operator-only project API, compact Qt progress and timeline links.
+- No automatic general-goal completion or causal personality reward for file operations.
+- Static validation only; Windows binaries, runtime tests and live LLM measurements not run.
+
 ## Unreleased — offline emotion dynamics and action plans
 
 - Time-based emotional decay, persistent transition causes and dominant-state hysteresis.

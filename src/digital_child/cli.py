@@ -71,6 +71,15 @@ HELP_TEXT = """Команды:
   /habits                       сформированные привычки и ожидания результата
   /reflections                  значимые изменения и результаты исследований
   /goals [N]                    активные и предложенные цели
+  /project                      список личных проектов и прогресс
+  /project create ТЕМА          проект заметки по доступной памяти
+  /project from-goal ID         связать выбранную цель с проектом
+  /project show|step ID         подробности или следующий шаг
+  /project start|pause|resume ID управление выполнением
+  /project retry|cancel ID      повтор ошибки или отмена
+  /project auto ID on|off       самостоятельные шаги в простое
+  /project extend ID ТЕМА       новый этап завершённого проекта
+  /project revise ID ТЕМА       пересмотр ещё не начатого этапа
   /needs                        текущие внутренние потребности
   /drives                       активные внутренние импульсы
   /background                   состояние когнитивного цикла
@@ -144,6 +153,49 @@ class ChatCommandRouter:
         self.person_id = "local-user"
 
     def handle(self, text: str) -> str:
+        if text == "/project":
+            return json.dumps([
+                {"id": p.id, "title": p.title, "status": p.status,
+                 "progress": p.progress, "autonomous": p.autonomous,
+                 "stop_reason": p.stop_reason}
+                for p in self.agent.projects.history(self.person_id)
+            ], ensure_ascii=False, indent=2)
+        if text.startswith("/project "):
+            parts = text.split(maxsplit=3)
+            try:
+                if len(parts) >= 3 and parts[1] == "create":
+                    return self.agent.create_project(
+                        text.split(maxsplit=2)[2], self.person_id
+                    ).model_dump_json(indent=2)
+                if len(parts) == 3 and parts[1] == "from-goal":
+                    goal = self.agent.repository.get_goal(parts[2])
+                    if goal is None:
+                        raise ValueError("Цель не найдена")
+                    return self.agent.create_project(
+                        goal.title, self.person_id, goal.id
+                    ).model_dump_json(indent=2)
+                if len(parts) >= 3:
+                    project_id = parts[2]
+                    project = self.agent.projects.get(project_id)
+                    if project.person_id not in {self.person_id, "agent"}:
+                        raise ValueError("Проект не найден")
+                    if parts[1] == "show" and len(parts) == 3:
+                        return project.model_dump_json(indent=2)
+                    if parts[1] == "step" and len(parts) == 3:
+                        return self.agent.step_project(
+                            project_id, person_id=self.person_id
+                        ).model_dump_json(indent=2)
+                    if (
+                        len(parts) == 3 and parts[1] in
+                        {"start", "pause", "resume", "retry", "cancel"}
+                    ) or (len(parts) == 4 and parts[1] in {"auto", "extend", "revise"}):
+                        return self.agent.change_project(
+                            project_id, parts[1], parts[3] if len(parts) == 4 else "",
+                            person_id=self.person_id,
+                        ).model_dump_json(indent=2)
+                return "Используйте /help — команды /project."
+            except ValueError as exc:
+                return str(exc)
         if text == "/memory-index":
             return json.dumps(
                 self.agent.associative_memory.index_status(), ensure_ascii=False, indent=2
@@ -274,6 +326,11 @@ class ChatCommandRouter:
         if text.startswith("/timeline "):
             try:
                 timeline_event, episodes = self.agent.timeline.detail(text.split(maxsplit=1)[1])
+                related_project_id = timeline_event.related_records.get("personal_project")
+                if related_project_id is not None:
+                    project = self.agent.projects.get(related_project_id)
+                    if project.person_id not in {self.person_id, "agent"}:
+                        raise ValueError("Событие не найдено")
                 return json.dumps(
                     {
                         "event": timeline_event.model_dump(mode="json"),

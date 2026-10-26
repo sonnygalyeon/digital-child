@@ -4,7 +4,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -43,6 +43,7 @@ from digital_child.models import (
     ResourceBudget,
     SourceRecord,
 )
+from digital_child.projects import PersonalProject, ProjectSummary
 from digital_child.service import create_agent
 
 
@@ -66,6 +67,17 @@ class PlanRequest(BaseModel):
 
 class MemoryBackfillRequest(BaseModel):
     batch_size: int = Field(default=100, ge=1, le=2000)
+
+
+class ProjectRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    person_id: str = Field(default="api-user", min_length=1, max_length=200)
+    goal_id: str | None = None
+
+
+class ProjectChangeRequest(BaseModel):
+    action: Literal["start", "pause", "resume", "retry", "cancel", "auto", "extend", "revise"]
+    text: str = Field(default="", max_length=500)
 
 
 class InteractionRequest(BaseModel):
@@ -111,10 +123,13 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     def get_agent(request: Request) -> DigitalChildAgent:
         return cast(DigitalChildAgent, request.app.state.agent)
 
-    def require_operator(request: Request) -> None:
+    def is_operator(request: Request) -> bool:
         expected = os.environ.get("DIGITAL_CHILD_OPERATOR_TOKEN", "").strip()
         provided = request.headers.get("X-Operator-Token", "")
-        if not expected or provided != expected:
+        return bool(expected) and provided == expected
+
+    def require_operator(request: Request) -> None:
+        if not is_operator(request):
             raise HTTPException(
                 status_code=403,
                 detail=(
@@ -259,6 +274,57 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         with agent._interaction_lock:
             return agent.associative_memory.backfill(payload.batch_size)
 
+    @application.get(
+        "/v1/projects", response_model=list[ProjectSummary],
+        dependencies=[Depends(require_operator)],
+    )
+    def projects(request: Request, limit: int = 30) -> list[ProjectSummary]:
+        return get_agent(request).projects.history(limit=limit)
+
+    @application.get(
+        "/v1/projects/{project_id}", response_model=PersonalProject,
+        dependencies=[Depends(require_operator)],
+    )
+    def project(project_id: str, request: Request) -> PersonalProject:
+        try:
+            return get_agent(request).projects.get(project_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @application.post(
+        "/v1/projects", response_model=PersonalProject,
+        dependencies=[Depends(require_operator)],
+    )
+    def create_project(payload: ProjectRequest, request: Request) -> PersonalProject:
+        try:
+            return get_agent(request).create_project(
+                payload.title, payload.person_id, payload.goal_id
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.post(
+        "/v1/projects/{project_id}/step", response_model=PersonalProject,
+        dependencies=[Depends(require_operator)],
+    )
+    def step_project(project_id: str, request: Request) -> PersonalProject:
+        try:
+            return get_agent(request).step_project(project_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.post(
+        "/v1/projects/{project_id}/actions", response_model=PersonalProject,
+        dependencies=[Depends(require_operator)],
+    )
+    def change_project(
+        project_id: str, payload: ProjectChangeRequest, request: Request,
+    ) -> PersonalProject:
+        try:
+            return get_agent(request).change_project(project_id, payload.action, payload.text)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @application.get("/v1/plans", response_model=list[ActionPlan])
     def plans(request: Request, limit: int = 20) -> list[ActionPlan]:
         return get_agent(request).plans.history(limit)
@@ -367,12 +433,18 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
 
     @application.get("/v1/timeline")
     def timeline(request: Request, person_id: str | None = None, limit: int = 50) -> object:
-        return get_agent(request).timeline.history(person_id, limit)
+        events = get_agent(request).timeline.history(person_id, limit)
+        return [
+            event for event in events
+            if "personal_project" not in event.related_records or is_operator(request)
+        ]
 
     @application.get("/v1/timeline/{event_id}")
     def timeline_detail(event_id: str, request: Request) -> object:
         try:
             event, episodes = get_agent(request).timeline.detail(event_id)
+            if "personal_project" in event.related_records:
+                require_operator(request)
             return {
                 "event": event,
                 "episodes": episodes,

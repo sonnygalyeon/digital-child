@@ -434,6 +434,7 @@ class DesktopWindow(QMainWindow):
             ("Память", "/memory"),
             ("Убеждения", "/beliefs"),
             ("Цели", "/goals"),
+            ("Проекты", "/project"),
             ("Инициатива", "/initiative"),
             ("Справка", "/help"),
         ):
@@ -734,6 +735,12 @@ class DesktopWindow(QMainWindow):
             if action_plan
             else "Активного плана действий нет. /plan — управление планами."
         )
+        projects = snapshot.get("projects", [])
+        if projects:
+            self.plan_label.setText(self.plan_label.text() + "\n" + "\n".join(
+                f"{p['title']}: {p['progress']:.0%} · {p['status']}"
+                + (f" · {p['reason']}" if p.get('reason') else "") for p in projects[:3]
+            ))
         self._apply_timeline(snapshot.get("timeline", []))
         skills = snapshot.get("competence", [])
         self.skills_label.setText(
@@ -928,9 +935,14 @@ def run_window(
 def main() -> None:
     # A GUI entry point for pythonw.exe and future packaged Windows builds.
     multiprocessing.freeze_support()
+    import sys
+
+    from digital_child.app_paths import configure_packaged_app
     from digital_child.config import env_bool, load_dotenv
 
-    load_dotenv()
+    configure_packaged_app()
+    if not getattr(sys, "frozen", False):
+        load_dotenv()
     run_window(
         Path(os.environ.get("DIGITAL_CHILD_DB", "data/digital_child.db")),
         auto_research=env_bool("DIGITAL_CHILD_AUTO_RESEARCH", True),

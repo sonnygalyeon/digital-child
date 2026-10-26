@@ -77,6 +77,8 @@ from digital_child.models import (
     SourceRecord,
 )
 from digital_child.novelty import NoveltyEngine
+from digital_child.project_tools import ProjectTools
+from digital_child.projects import PersonalProject, ProjectManager
 from digital_child.psychology import PsychologyEngine
 from digital_child.psychology_models import BehaviorTrace
 from digital_child.regulation import GUIDANCE, RegulationAttempt, RegulationLearner
@@ -182,6 +184,14 @@ class DigitalChildAgent:
             self.identity.id,
             self.cognitive_backend,
             lambda: self.cognitive_loop.budgets.consume("memory_analysis"),
+        )
+        self.projects = ProjectManager(
+            self.repository, self.identity.id,
+            ProjectTools(
+                self.repository.database_path.resolve().parent / "projects" / self.identity.id,
+                self.associative_memory,
+            ),
+            self.cognitive_loop.budgets,
         )
         # Backfill only attributable observations; legacy conversations lack a
         # reliable per-person link and stay in the existing dialogue memory.
@@ -670,7 +680,9 @@ class DigitalChildAgent:
             ),
             beliefs_summary=self._beliefs_summary(),
             needs_summary=self._needs_summary(),
-            active_goal_summary=self._active_goal_summary(),
+            active_goal_summary=(
+                self._active_goal_summary() + " " + self.projects.guidance(person_id)
+            ),
             conversation_history=conversation_history,
             development_stage=self.profile.stage.value,
             total_deu=self.profile.total_deu,
@@ -1202,6 +1214,116 @@ class DigitalChildAgent:
             if len(trials) < 6 and sum(item.status == "completed" for item in trials) < 2:
                 self.start_plan(kind, autonomous=True)
                 break
+
+    def create_project(
+        self, title: str, person_id: str = "local-user", goal_id: str | None = None,
+    ) -> PersonalProject:
+        self.initiative.invalidate()
+        with self._interaction_lock:
+            goal = None if goal_id is None else self.repository.get_goal(goal_id)
+            if goal_id is not None and (goal is None or goal.status != GoalStatus.ACTIVE):
+                raise ValueError("Связанная цель должна быть активной")
+            if goal_id and self.repository.load_feature(
+                "goal_project", goal_id, self.identity.id
+            ) is not None:
+                raise ValueError("Для этой цели уже есть проект")
+            project = self.projects.create(title, person_id, self.clock.now(), goal=goal)
+            self.timeline.record(
+                "project_created", f"Создан проект: {project.title}", {}, {},
+                person_id=person_id, related_records={"personal_project": project.id},
+                now=self.clock.now(),
+            )
+            return project
+
+    def change_project(
+        self, project_id: str, action: str, text: str = "", *, person_id: str | None = None,
+    ) -> PersonalProject:
+        self.initiative.invalidate()
+        with self._interaction_lock:
+            previous = self.projects.get(project_id)
+            if person_id is not None and previous.person_id not in {person_id, "agent"}:
+                raise ValueError("Проект не найден")
+            project = self.projects.change(
+                project_id, action, self.clock.now(), text, person_id=person_id
+            )
+            self.timeline.record(
+                "project_changed", f"Проект «{project.title}»: {action}",
+                {"project.status": previous.status}, {"project.status": project.status},
+                person_id=None if project.person_id == "agent" else project.person_id,
+                related_records={"personal_project": project.id}, now=self.clock.now(),
+            )
+            return project
+
+    def step_project(
+        self, project_id: str, *, autonomous: bool = False, person_id: str | None = None,
+    ) -> PersonalProject:
+        if not autonomous:
+            self.initiative.invalidate()
+        with self._interaction_lock:
+            previous = self.projects.get(project_id)
+            if person_id is not None and previous.person_id not in {person_id, "agent"}:
+                raise ValueError("Проект не найден")
+            if self.state.energy < 0.08:
+                raise ValueError("Недостаточно энергии; проект сохранён для продолжения")
+            pending = next((s for s in previous.steps if s.status != "completed"), None)
+            expected = (
+                self.competence.get("tool:" + pending.tool).confidence if pending else 0.5
+            )
+            project = self.projects.step(
+                project_id, self.clock.now(), autonomous=autonomous, expected_success=expected
+            )
+            changed = next(
+                (s for s, old in zip(project.steps, previous.steps, strict=True)
+                 if s.model_dump() != old.model_dump()), None,
+            )
+            if changed is not None:
+                with self.repository.transaction():
+                    self.competence.record(
+                        "tool:" + changed.tool, f"{changed.id}:{changed.attempts}",
+                        float(changed.status == "completed"), changed.expected_success,
+                    )
+                    self.timeline.record(
+                        "project_step", f"Проект «{project.title}»: {changed.tool}",
+                        {"project.status": previous.status},
+                        {"project.status": project.status, "step.status": changed.status},
+                        person_id=None if project.person_id == "agent" else project.person_id,
+                        related_records={"personal_project": project.id},
+                        episode_ids=[] if changed.result is None else changed.result.episode_ids,
+                        now=self.clock.now(),
+                    )
+            return project
+
+    def maybe_projects(self) -> None:
+        from digital_child.config import env_bool
+
+        now = self.clock.now()
+        if not env_bool("DIGITAL_CHILD_PROJECTS_ENABLED", True):
+            return
+        goal_id = self.cognitive_loop.status.active_goal_id
+        goal = None if goal_id is None else self.repository.get_goal(goal_id)
+        if (
+            goal is not None and goal.status == GoalStatus.ACTIVE
+            and goal.origin == GoalOrigin.SELF_GENERATED
+            and self.cognitive_loop.budgets.get("personal_projects").remaining
+        ):
+            self.projects.propose_goal(goal, now)
+        if self.state.energy < 0.35:
+            return
+        inputs = self.repository.latest_user_messages(1)
+        last_contact = inputs[0].created_at if inputs else self.clock.launch_at
+        if (now - last_contact).total_seconds() < 300:
+            return
+        candidates = [
+            p for p in self.projects.history(limit=500)
+            if p.status == "active" and p.autonomous
+            and (now - p.updated_at).total_seconds() >= 60
+        ]
+        candidates.sort(key=lambda p: (p.goal_id != goal_id, p.updated_at))
+        if (
+            candidates and self.cognitive_loop.budgets.get("project_steps").remaining
+            and self.cognitive_loop.budgets.get("autonomous_project_steps").remaining
+        ):
+            self.step_project(candidates[0].id, autonomous=True)
 
     def update_idle_emotion(self) -> None:
         previous = self.emotion

@@ -115,6 +115,7 @@ class InitiativeRuntime:
             now = agent.clock.now()
             agent.maybe_regulate()
             agent.associative_memory.backfill(100)
+            agent.maybe_projects()
             agent.maybe_plan()
             agent.maybe_experiment()
             inputs = agent.repository.latest_user_messages()
@@ -328,7 +329,9 @@ class InitiativeRuntime:
             development_stage=agent.profile.stage.value,
             total_deu=agent.profile.total_deu,
             needs_summary=agent._needs_summary(),
-            active_goal_summary=agent._active_goal_summary(),
+            active_goal_summary=(
+                agent._active_goal_summary() + " " + agent.projects.guidance(plan.person_id)
+            ),
             psychology_summary=agent.psychology.summary(psyche),
             development_summary=development.guidance,
             behavior_guidance=(development.guidance,) + plan.guidance,

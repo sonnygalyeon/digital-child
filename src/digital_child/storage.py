@@ -894,6 +894,13 @@ class SQLiteRepository:
                 ),
             )
 
+    def get_goal(self, goal_id: str) -> Goal | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT goal_json FROM goals WHERE id = ?", (goal_id,)
+            ).fetchone()
+        return None if row is None else Goal.model_validate_json(row["goal_json"])
+
     def list_goals(self, limit: int = 100, active_only: bool = True) -> list[Goal]:
         condition = "WHERE status = 'active'" if active_only else ""
         with self._lock:

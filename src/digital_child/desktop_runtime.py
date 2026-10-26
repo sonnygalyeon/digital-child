@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from multiprocessing.connection import Connection
@@ -19,6 +20,7 @@ def desktop_snapshot(agent: DigitalChildAgent, person_id: str = "local-user") ->
     psyche = agent.psychology.snapshot()
     development = developmental_dynamics(agent.profile)
     action_plan = agent.plans.active()
+    projects = agent.projects.history(person_id, 5)
     active_goal = next(
         (
             goal
@@ -40,6 +42,11 @@ def desktop_snapshot(agent: DigitalChildAgent, person_id: str = "local-user") ->
         "loop": agent.cognitive_loop.status.model_dump(mode="json"),
         "needs": [need.model_dump(mode="json") for need in agent.cognitive_loop.needs()],
         "goal": None if active_goal is None else active_goal.title,
+        "projects": [
+            {"id": p.id, "title": p.title, "status": p.status,
+             "progress": p.progress, "reason": p.stop_reason}
+            for p in projects
+        ],
         "action_plan": None
         if action_plan is None
         else {
@@ -91,6 +98,9 @@ def run_agent_session(
             connection.send({"type": kind, **payload})
 
     try:
+        from digital_child.app_paths import configure_packaged_app
+
+        configure_packaged_app()
         agent = create_agent(Path(database_path), auto_research=auto_research)
         router = ChatCommandRouter(agent)
         agent.set_background_notifier(lambda message: send("notice", text=message))
@@ -202,6 +212,7 @@ def run_agent_session(
     except (BrokenPipeError, EOFError):
         pass
     except Exception as exc:
+        logging.exception("Agent session failed")
         try:
             send("fatal", text=f"Не удалось запустить агента: {exc}")
         except (BrokenPipeError, EOFError, OSError):
