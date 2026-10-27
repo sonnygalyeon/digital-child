@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased — smaller desktop environment
+
+- Replace the full PySide6 meta-package with PySide6-Essentials in the desktop extra.
+- Remove PySide6 and Addons from the lock while retaining the Qt/Shiboken versions.
+- Resynchronize the local environment, restoring shared Qt files from Essentials.
+- Explicitly collect Qt's deprecated support helper for the pinned PyInstaller hook.
+- Verify dependency consistency, used Qt imports and static checks; no tests or LLM run.
+
+## Unreleased — project structure and architecture
+
+- Organize the application into domain, application, cognition, psychology, memory,
+  learning, planning, inference, infrastructure and interface packages.
+- Extract shared chat commands from the CLI and action orchestration from the agent.
+- Preserve primary public import paths and existing entry points through explicit facades.
+- Update internal imports, existing test imports, dynamic launch targets and packaging paths.
+- Group documentation into guides, feature descriptions and marked historical records.
+- Add an AST architecture checker for module targets, layer boundaries and import cycles.
+- Consolidate tool caches under `.cache` and add bounded workspace inspection/cleanup.
+- Keep existing environments, configuration, memory databases and model files.
+- Static validation only; tests, LLM inference and Windows execution omitted.
+
 ## Unreleased — Windows packaging and goal-linked projects
 
 - Add a Windows PyInstaller folder bundle, archive/hash script and manual build workflow.

@@ -1,0 +1,38 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from digital_child.application.agent import DigitalChildAgent
+from digital_child.inference.backend import CognitiveBackend, build_cognitive_backend
+from digital_child.infrastructure.config import load_dotenv
+from digital_child.infrastructure.repository import SQLiteRepository
+from digital_child.infrastructure.search import SearchProvider, build_search_provider
+
+
+def create_agent(
+    database_path: str | Path | None = None,
+    *,
+    search_provider: SearchProvider | None = None,
+    cognitive_backend: CognitiveBackend | None = None,
+    auto_research: bool | None = None,
+    research_mode: str | None = None,
+) -> DigitalChildAgent:
+    load_dotenv()
+    path = Path(database_path or os.environ.get("DIGITAL_CHILD_DB", "data/digital_child.db"))
+    if auto_research is None:
+        auto_research = os.environ.get("DIGITAL_CHILD_AUTO_RESEARCH", "1").lower() not in {
+            "0",
+            "false",
+            "off",
+            "no",
+        }
+    if research_mode is None:
+        research_mode = os.environ.get("DIGITAL_CHILD_RESEARCH_MODE", "background").strip().lower()
+    return DigitalChildAgent(
+        SQLiteRepository(path),
+        search_provider=search_provider or build_search_provider(),
+        cognitive_backend=cognitive_backend or build_cognitive_backend(),
+        auto_research=auto_research,
+        research_mode=research_mode,
+    )

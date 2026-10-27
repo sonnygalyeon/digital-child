@@ -41,4 +41,4 @@ if (-not $NoShortcut) {
 
 Write-Host "Desktop installed. Start with the Digital Child shortcut." -ForegroundColor Green
 Write-Host "Configure .env for your LLM. Existing configuration and memory are preserved."
-Write-Host "Local Ollama model default: digital-child-fast (see docs/WINDOWS_LLM_HOST.md)."
+Write-Host "Local Ollama model default: digital-child-fast (see docs/guides/WINDOWS_LLM_HOST.md)."

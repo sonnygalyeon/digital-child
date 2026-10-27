@@ -36,15 +36,15 @@
 - Сохраняемые проекты с этапами, паузой, пересмотром и отдельным разрешением фоновых шагов.
 - Подготовленная Windows-упаковка, ручной build workflow и отдельный каталог данных.
 
-Подробности: [DEVELOPMENTAL_PSYCHOLOGY.md](DEVELOPMENTAL_PSYCHOLOGY.md)
-и [DESKTOP_APP.md](DESKTOP_APP.md). Изменения психологии пока проверены статически;
+Подробности: [DEVELOPMENTAL_PSYCHOLOGY.md](features/DEVELOPMENTAL_PSYCHOLOGY.md)
+и [DESKTOP_APP.md](guides/DESKTOP_APP.md). Изменения психологии пока проверены статически;
 тесты для этого этапа не добавлялись и не запускались по запросу пользователя.
-Завершённое продолжение: [INITIATIVE_AND_OFFLINE.md](INITIATIVE_AND_OFFLINE.md).
-Следующее расширение: [BEHAVIOR_EXTENSIONS.md](BEHAVIOR_EXTENSIONS.md).
-Память и обучение: [LEARNING_AND_MEMORY.md](LEARNING_AND_MEMORY.md).
-Офлайн-продолжение: [OFFLINE_DYNAMICS_AND_PLANS.md](OFFLINE_DYNAMICS_AND_PLANS.md).
-Проекты: [PERSONAL_PROJECTS.md](PERSONAL_PROJECTS.md).
-Сборка Windows: [WINDOWS_BUILD.md](WINDOWS_BUILD.md).
+Завершённое продолжение: [INITIATIVE_AND_OFFLINE.md](features/INITIATIVE_AND_OFFLINE.md).
+Следующее расширение: [BEHAVIOR_EXTENSIONS.md](features/BEHAVIOR_EXTENSIONS.md).
+Память и обучение: [LEARNING_AND_MEMORY.md](features/LEARNING_AND_MEMORY.md).
+Офлайн-продолжение: [OFFLINE_DYNAMICS_AND_PLANS.md](features/OFFLINE_DYNAMICS_AND_PLANS.md).
+Проекты: [PERSONAL_PROJECTS.md](features/PERSONAL_PROJECTS.md).
+Сборка Windows: [WINDOWS_BUILD.md](guides/WINDOWS_BUILD.md).
 
 ## Следующий этап — действия вне закрытой симуляции
 

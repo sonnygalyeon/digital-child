@@ -7,10 +7,10 @@ if __name__ == "__main__":
     import logging
 
     try:
-        from digital_child.app_paths import configure_packaged_app
+        from digital_child.infrastructure.app_paths import configure_packaged_app
 
         configure_packaged_app()
-        from digital_child.desktop_app import main
+        from digital_child.interfaces.desktop.desktop_app import main
 
         main()
     except Exception as exc:
